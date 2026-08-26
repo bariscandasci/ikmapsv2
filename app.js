@@ -245,7 +245,7 @@ function estimateTransit(origin, dest) {
 // ---------------------------------------------------------------------------
 
 const TransitCache = {
-  KEY: "ik_ulasim_cache_v7", // v7: yaklaşık rota mesajında hedef adı stop yerine proje/bölge adıyla gösteriliyor
+  KEY: "ik_ulasim_cache_v9", // v9: Malıköy/Sincan Meteksan Matbaa (çok uzak, 160dk/2 aktarma) kaldırıldı
   _mem: null,
   _load() {
     if (this._mem) return this._mem;
@@ -332,7 +332,7 @@ function writeJsonCache(key, obj) {
 }
 
 const GEOCODE_CACHE_KEY = "ik_ulasim_geocode_cache_v1";
-const DISCOVERY_CACHE_KEY = "ik_ulasim_discovery_cache_v2"; // v2: yaklaşık/yanlış durak eşleşmeleri (ör. "208 hattı Ulus'a gidiyor") temizlendiği için önbellek sıfırlandı
+const DISCOVERY_CACHE_KEY = "ik_ulasim_discovery_cache_v3"; // v3: KNOWN_STOP_NAME_INDEX genişletildi (yeni gerçek duraklar), önbellek sıfırlandı
 
 /** Serbest metin bir adresi/semt adını Ankara sınırlarıyla sınırlı şekilde koordinata çevirir (OSM Nominatim). */
 async function geocodeAddress(query) {
@@ -390,6 +390,27 @@ const KNOWN_STOP_NAME_INDEX = [
   ["beytepe", "stop_beytepe"],
   ["ümitköy", "stop_umitkoy"],
   ["saray", "stop_pursaklar_est"],
+  ["macunköy", "stop_macunkoy"],
+  ["ivedik", "stop_ivedik"],
+  ["akköprü", "stop_akkopru"],
+  ["sıhhiye", "stop_sihhiye"],
+  ["dışkapı", "stop_disgapi"],
+  ["necatibey", "stop_necatibey"],
+  ["odtü", "stop_odtu"],
+  ["millî kütüphane", "stop_milli_kutuphane"],
+  ["milli kütüphane", "stop_milli_kutuphane"],
+  ["tarım bakanlığı", "stop_tarim_bakanligi"],
+  ["danıştay", "stop_tarim_bakanligi"],
+  ["botanik", "stop_botanik"],
+  ["törekent", "stop_torekent"],
+  ["maltepe", "stop_maltepe"],
+  ["kolej", "stop_kolej"],
+  ["demirtepe", "stop_demirtepe"],
+  ["anıtkabir", "stop_anadolu_anitkabir"],
+  ["behiçbey", "stop_behicbey"],
+  ["hipodrom", "stop_hipodrom"],
+  ["cebeci", "stop_cebeci"],
+  ["kayaş", "stop_kayas"],
 ];
 
 // OSM'deki "name" etiketi çoğunlukla hat numarasını zaten içeriyor
@@ -606,10 +627,6 @@ function durationBucket(min) {
   return { key: "bad", label: "60+ dk", color: "#dc2626" };
 }
 
-function hrScriptLine(originName, projectName, estimate) {
-  return `${originName} → ${projectName}: ~${estimate.durationMin} dk | ${estimate.routeSummary} | ${estimate.transfers} aktarma`;
-}
-
 const MODE_ICON = { metro: "🚇", ankaray: "🚊", tren: "🚆", otobus: "🚌", hub: "📍" };
 // Haritada bacak başına renk: gerçek dünyadaki Ankara toplu taşıma renklerine
 // yakın bir palet (M4 turuncu/sarı, Ankaray yeşil, Başkentray mor, otobüs teal).
@@ -728,9 +745,6 @@ const projectSelect = document.getElementById("projectSelect");
 const thresholdButtons = document.querySelectorAll(".threshold-btn");
 const resultsList = document.getElementById("resultsList");
 const resultsHeading = document.getElementById("resultsHeading");
-const hrCard = document.getElementById("hrCard");
-const hrCardText = document.getElementById("hrCardText");
-const copyBtn = document.getElementById("copyBtn");
 const emptyState = document.getElementById("emptyState");
 const routeDetail = document.getElementById("routeDetail");
 const routeDetailTitle = document.getElementById("routeDetailTitle");
@@ -930,7 +944,6 @@ function renderNearbyLinesPanel(originId) {
 function clearResults() {
   resultsList.innerHTML = "";
   routesLayer.clearLayers();
-  hrCard.classList.add("hidden");
   routeDetail.classList.add("hidden");
   emptyState.classList.remove("hidden");
   resultsHeading.textContent = "";
@@ -986,19 +999,18 @@ function renderOriginToProject(originId) {
         referral: row.project.referral,
         onClick: () => {
           drawRoute(origin.coords, row, bucket);
-          showRouteResult(origin.name, row.project.name, row);
+          showRouteResult(row);
         },
         highlight: idx === 0,
       })
     );
     if (idx === 0) {
       drawRoute(origin.coords, row, bucket);
-      showRouteResult(origin.name, row.project.name, row);
+      showRouteResult(row);
     }
   });
 
   if (rows.length === 0) {
-    hrCard.classList.add("hidden");
     routeDetail.classList.add("hidden");
   }
   map.setView([origin.coords.lat, origin.coords.lng], 11, { animate: true, duration: 0.8 });
@@ -1033,19 +1045,18 @@ function renderProjectToOrigin(projectId) {
         bucket,
         onClick: () => {
           drawRoute(districtCoords, { ...row, project: project }, bucket, project.coords);
-          showRouteResult(row.district.name, project.name, row);
+          showRouteResult(row);
         },
         highlight: idx === 0,
       })
     );
     if (idx === 0) {
       drawRoute(districtCoords, { ...row, project: project }, bucket, project.coords);
-      showRouteResult(row.district.name, project.name, row);
+      showRouteResult(row);
     }
   });
 
   if (rows.length === 0) {
-    hrCard.classList.add("hidden");
     routeDetail.classList.add("hidden");
   }
   map.setView([project.coords.lat, project.coords.lng], 11, { animate: true, duration: 0.8 });
@@ -1198,27 +1209,12 @@ function drawRoute(originCoords, row, bucket, destCoordsOverride) {
   }
 }
 
-function showRouteResult(originName, destName, estimate) {
-  hrCardText.textContent = hrScriptLine(originName, destName, estimate);
-  hrCard.classList.remove("hidden");
-  hrCard.classList.toggle("hr-card-unverified", !estimate.verified);
-
+function showRouteResult(estimate) {
   routeDetailTitle.innerHTML = `Rota Detayı · ${estimate.transfers} aktarma · ~${estimate.durationMin} dk`;
   routeDetailSteps.innerHTML = renderRouteSteps(estimate.steps);
   routeDetailWarning.classList.toggle("hidden", estimate.verified);
   routeDetail.classList.remove("hidden");
 }
-
-copyBtn.addEventListener("click", async () => {
-  try {
-    await navigator.clipboard.writeText(hrCardText.textContent);
-    copyBtn.textContent = "Kopyalandı ✓";
-    setTimeout(() => (copyBtn.textContent = "Kopyala"), 1500);
-  } catch {
-    copyBtn.textContent = "Kopyalanamadı";
-    setTimeout(() => (copyBtn.textContent = "Kopyala"), 1500);
-  }
-});
 
 // İlk yükleme
 clearResults();
