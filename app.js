@@ -245,7 +245,7 @@ function estimateTransit(origin, dest) {
 // ---------------------------------------------------------------------------
 
 const TransitCache = {
-  KEY: "ik_ulasim_cache_v9", // v9: Malıköy/Sincan Meteksan Matbaa (çok uzak, 160dk/2 aktarma) kaldırıldı
+  KEY: "ik_ulasim_cache_v10", // v10: "Proje → Aday Havuzu" modunda da proje konumu için canlı otobüs/metro keşfi çalışıyor
   _mem: null,
   _load() {
     if (this._mem) return this._mem;
@@ -292,10 +292,13 @@ function getTransitEstimate(originId, origin, destId, dest) {
   return result;
 }
 
-function invalidateCacheForOrigin(originId) {
+// Cache anahtarı "originId__destId" biçiminde; id, anahtarın herhangi bir
+// tarafında olabilir ("Aday → Proje" modunda origin ilk taraf, "Proje →
+// Aday Havuzu" modunda proje ikinci taraftır) — bu yüzden ikisini de kontrol eder.
+function invalidateCacheForOrigin(id) {
   const mem = TransitCache._load();
   Object.keys(mem)
-    .filter((k) => k.startsWith(`${originId}__`))
+    .filter((k) => k.startsWith(`${id}__`) || k.endsWith(`__${id}`))
     .forEach((k) => delete mem[k]);
   TransitCache._save();
 }
@@ -681,10 +684,10 @@ function renderRouteSteps(steps) {
 // ---------------------------------------------------------------------------
 
 const map = L.map("map", { zoomControl: true }).setView([39.935, 32.82], 10.4);
-L.tileLayer("https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png", {
-  attribution: "&copy; OpenStreetMap katkıda bulunanlar &copy; <a href=\"https://carto.com/attributions\">CARTO</a>",
-  maxZoom: 20,
-  subdomains: "abcd",
+L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+  attribution: "&copy; OpenStreetMap katkıda bulunanlar",
+  maxZoom: 19,
+  subdomains: "abc",
 }).addTo(map);
 L.control.scale({ metric: true, imperial: false, position: "bottomright" }).addTo(map);
 
@@ -871,10 +874,23 @@ async function handleAddressSearch() {
 
 const currentDiscoveryByOriginId = {};
 
+// Bir origin/project id'sinin şu an ekranda aktif seçili olan taraf olup
+// olmadığını (yani panel/sonuçları yeniden çizmenin anlamlı olup olmadığını)
+// her iki mod için de doğru şekilde belirler.
+function isActiveSelection(id) {
+  if (currentMode === "origin-to-project") return originSelect.value === id;
+  if (currentMode === "project-to-origin") return projectSelect.value === id;
+  return false;
+}
+
 /**
- * Hazır ilçe/mahalle seçimleri için de aynı canlı keşfi (arka planda, sonucu
- * beklemeden) çalıştırır: statik veri anında sonuç verir, birkaç saniye
- * sonra bulunan ek gerçek hatlar sessizce eklenip sonuçlar tazelenir.
+ * Hazır ilçe/mahalle/proje seçimleri için de aynı canlı keşfi (arka planda,
+ * sonucu beklemeden) çalıştırır: statik veri anında sonuç verir, birkaç
+ * saniye sonra bulunan ek gerçek hatlar sessizce eklenip sonuçlar tazelenir.
+ * "Aday → Proje" modunda seçilen ilçe/adres için, "Proje → Aday Havuzu"
+ * modunda ise seçilen projenin kendi konumu için çağrılır — aksi halde
+ * yalnızca bir yönde canlı otobüs/metro keşfi çalışıp diğer yönde (özellikle
+ * otobüs durağı olan projelerde) metro↔otobüs aktarmaları eksik kalıyordu.
  */
 async function enrichOriginInBackground(origin) {
   if (origin.kind === "custom" || enrichedOriginIds.has(origin.id)) return;
@@ -885,18 +901,18 @@ async function enrichOriginInBackground(origin) {
     const addedCount = spliceDiscoveredLines(origin.stopId, discovery);
     if (addedCount > 0) {
       invalidateCacheForOrigin(origin.id);
-      if (currentMode === "origin-to-project" && originSelect.value === origin.id) {
+      if (isActiveSelection(origin.id)) {
         renderNearbyLinesPanel(origin.id);
         runSearch();
       }
-    } else if (currentMode === "origin-to-project" && originSelect.value === origin.id) {
+    } else if (isActiveSelection(origin.id)) {
       renderNearbyLinesPanel(origin.id);
     }
   } catch {
     // canlı sorgu başarısız oldu: sonsuz "taranıyor" durumunda kalmasın diye
     // boş sonuç olarak işaretle, statik veriyle sessizce devam et.
     currentDiscoveryByOriginId[origin.id] = { stops: [], lines: [], nearestStopName: null };
-    if (currentMode === "origin-to-project" && originSelect.value === origin.id) {
+    if (isActiveSelection(origin.id)) {
       renderNearbyLinesPanel(origin.id);
     }
   }
@@ -994,6 +1010,7 @@ function renderOriginToProject(originId) {
           meal: row.project.meal,
           transport: row.project.transport,
           shift: row.project.shift,
+          gender: row.project.gender,
         },
         urgent: URGENT_PROJECT_IDS.has(row.project.id),
         referral: row.project.referral,
@@ -1024,6 +1041,9 @@ function renderProjectToOrigin(projectId) {
 
   const project = projectById(projectId);
   resultsHeading.textContent = `${project.name} → En Uygun İlçeler (${rows.length})`;
+
+  enrichOriginInBackground(project);
+  renderNearbyLinesPanel(projectId);
 
   resultsList.innerHTML = "";
   rows.forEach((row, idx) => {
@@ -1066,12 +1086,14 @@ function buildResultCard({ title, subtitle, durationMin, transfers, bucket, onCl
   const card = document.createElement("button");
   card.className = `result-card ${highlight ? "result-card-active" : ""} ${urgent ? "result-card-urgent" : ""}`;
   const referralRow = referral ? `<div class="result-card-referral">📌 ${referral}</div>` : "";
+  const genderSpan = terms && terms.gender ? `<span>👤 ${terms.gender}</span>` : "";
   const termsRow = terms
     ? `<div class="result-card-terms">
         <span>💰 ${terms.salary}</span>
         <span>🍽️ ${terms.meal}</span>
         <span>🚌 ${terms.transport}</span>
         <span>⏰ ${terms.shift}</span>
+        ${genderSpan}
       </div>`
     : "";
   const urgentBadge = urgent ? `<span class="result-card-urgent-badge">ACİL</span>` : "";
@@ -1137,6 +1159,13 @@ function interpolateCoords(a, b, t) {
   return { lat: a.lat + (b.lat - a.lat) * t, lng: a.lng + (b.lng - a.lng) * t };
 }
 
+// Gerçek hat geometrisinin bir ucu, o bacağın gerçek başlangıç/bitiş noktasından
+// (aktarma durağı ya da projenin/adayın kendi konumu) bu kadar uzaksa, aradaki
+// boşluk ayrı ince kesikli bir "son adım" çizgisiyle tamamlanır — aksi halde ya
+// çizgi havada asılı kalıyor ya da (eski davranışta) hiçbir yolu takip etmeyen
+// dümdüz bir çizgi gerçek rota gibi katı çizilip yanıltıyordu.
+const REAL_GEOMETRY_CONNECT_LIMIT_KM = 0.15;
+
 /**
  * Rotayı, mümkün olduğunca hatların OSM'den alınan gerçek geometrisini
  * (yol/ray şeklini) takip ederek çizer. Her bacak kendi rengiyle/gerçek
@@ -1176,32 +1205,53 @@ function drawRoute(originCoords, row, bucket, destCoordsOverride) {
     const endA = anchors[i + 1];
     const geometry = geometryOfStep(step);
     const modeColor = MODE_LINE_COLOR[step.mode] || bucket.color;
+    const tooltipText = `${MODE_ICON[step.mode] || ""} ${step.line}`;
 
-    let latlngs;
-    let dashed;
+    const drawSegment = (latlngs, dashed) => {
+      const poly = L.polyline(latlngs, {
+        color: modeColor,
+        weight: dashed ? 3 : 5,
+        opacity: dashed ? 0.6 : 0.9,
+        dashArray: dashed ? "2 8" : null,
+        lineJoin: "round",
+        lineCap: "round",
+      }).addTo(routesLayer);
+      poly.bindTooltip(tooltipText, { sticky: true });
+      allPoints.push(...latlngs);
+    };
+
     if (geometry) {
       const i1 = nearestPointIndex(geometry, startA);
       const i2 = nearestPointIndex(geometry, endA);
       const lo = Math.min(i1, i2);
       const hi = Math.max(i1, i2);
       const seg = geometry.slice(lo, hi + 1).map(([lat, lng]) => [lat, lng]);
-      latlngs = seg.length > 1 ? seg : [[startA.lat, startA.lng], [endA.lat, endA.lng]];
-      dashed = false;
-    } else {
-      latlngs = [[startA.lat, startA.lng], [endA.lat, endA.lng]];
-      dashed = true;
-    }
 
-    const poly = L.polyline(latlngs, {
-      color: modeColor,
-      weight: dashed ? 4 : 5,
-      opacity: dashed ? 0.7 : 0.9,
-      dashArray: dashed ? "2 8" : null,
-      lineJoin: "round",
-      lineCap: "round",
-    }).addTo(routesLayer);
-    poly.bindTooltip(`${MODE_ICON[step.mode] || ""} ${step.line}`, { sticky: true });
-    allPoints.push(...latlngs);
+      if (seg.length > 1) {
+        const segStart = { lat: seg[0][0], lng: seg[0][1] };
+        const segEnd = { lat: seg[seg.length - 1][0], lng: seg[seg.length - 1][1] };
+        const startIsNearSegStart = haversineKm(startA, segStart) <= haversineKm(startA, segEnd);
+        const nearStart = startIsNearSegStart ? segStart : segEnd;
+        const nearEnd = startIsNearSegStart ? segEnd : segStart;
+
+        // Gerçek güzergah her zaman katı çizgiyle çizilir.
+        drawSegment(seg, false);
+        // Gerçek hat, bacağın asıl uçlarına (durak/proje konumu) tam ulaşmıyorsa
+        // aradaki fark ince kesikli bir "son adım" çizgisiyle tamamlanır.
+        if (haversineKm(startA, nearStart) > REAL_GEOMETRY_CONNECT_LIMIT_KM) {
+          drawSegment([[startA.lat, startA.lng], [nearStart.lat, nearStart.lng]], true);
+        }
+        if (haversineKm(endA, nearEnd) > REAL_GEOMETRY_CONNECT_LIMIT_KM) {
+          drawSegment([[nearEnd.lat, nearEnd.lng], [endA.lat, endA.lng]], true);
+        }
+      } else {
+        // Gerçek geometri bu bacak için kullanılamadı (uçlar hattın tamamen
+        // aynı noktasına denk düştü) — dürüstçe kesikli/tahmini göster.
+        drawSegment([[startA.lat, startA.lng], [endA.lat, endA.lng]], true);
+      }
+    } else {
+      drawSegment([[startA.lat, startA.lng], [endA.lat, endA.lng]], true);
+    }
   });
 
   if (allPoints.length) {
