@@ -59,6 +59,19 @@ async function postToSheet(body) {
   return data;
 }
 
+// Birden fazla yazma isteğini PARALEL değil SIRAYLA gönderir. Apps Script
+// tarafında da bir kilit (LockService) var, ama aynı anda çok sayıda isteği
+// paralel ateşlemek gereksiz yere kilit çakışmasına/kuyruklamaya yol açar —
+// modallardan toplu kaydetme (ör. birden fazla proje aynı anda aç/kapa)
+// bu yüzden burada tek tek, önceki bitince bir sonraki gönderilecek şekilde yapılır.
+async function postToSheetSequential(bodies) {
+  const results = [];
+  for (const body of bodies) {
+    results.push(await postToSheet(body));
+  }
+  return results;
+}
+
 // transitStops kendi lat/lng'sini taşımıyor (sadece id/name/mode) — bir
 // durağın yaklaşık konumunu, o durağı accessStopId olarak kullanan
 // ilçe/mahalle ve projelerin konumlarından türetiyoruz.
@@ -1463,8 +1476,8 @@ urgentModalSave.addEventListener("click", async () => {
   urgentModalSave.disabled = true;
   urgentModalSave.textContent = "Kaydediliyor…";
   try {
-    await Promise.all(
-      changed.map((p) => postToSheet({ action: "update", id: p.id, patch: { urgent: checked.has(p.id) } }))
+    await postToSheetSequential(
+      changed.map((p) => ({ action: "update", id: p.id, patch: { urgent: checked.has(p.id) } }))
     );
     changed.forEach((p) => (p.urgent = checked.has(p.id)));
     recomputeUrgentInactiveSets();
@@ -1529,8 +1542,8 @@ inactiveModalSave.addEventListener("click", async () => {
   inactiveModalSave.disabled = true;
   inactiveModalSave.textContent = "Kaydediliyor…";
   try {
-    await Promise.all(
-      changed.map((p) => postToSheet({ action: "update", id: p.id, patch: { active: activeIds.has(p.id) } }))
+    await postToSheetSequential(
+      changed.map((p) => ({ action: "update", id: p.id, patch: { active: activeIds.has(p.id) } }))
     );
     changed.forEach((p) => (p.active = activeIds.has(p.id)));
     recomputeUrgentInactiveSets();
