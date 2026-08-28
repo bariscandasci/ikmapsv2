@@ -64,10 +64,21 @@ async function postToSheet(body) {
 // paralel ateşlemek gereksiz yere kilit çakışmasına/kuyruklamaya yol açar —
 // modallardan toplu kaydetme (ör. birden fazla proje aynı anda aç/kapa)
 // bu yüzden burada tek tek, önceki bitince bir sonraki gönderilecek şekilde yapılır.
-async function postToSheetSequential(bodies) {
+//
+// Bir öğe başarısız olursa (ör. Sheet yoğunken zaman aşımı) kalan öğeler için
+// denemeye DEVAM eder — tek bir başarısızlık yüzünden tüm yarım kalmış bir
+// toplu kaydetmede hangi öğelerin gerçekten uygulandığı belirsiz kalmasın diye.
+// onProgress(i, total) her öğeden sonra çağrılır (arayüzde ilerleme göstermek için).
+async function postToSheetSequential(bodies, onProgress) {
   const results = [];
-  for (const body of bodies) {
-    results.push(await postToSheet(body));
+  for (let i = 0; i < bodies.length; i++) {
+    try {
+      const data = await postToSheet(bodies[i]);
+      results.push({ ok: true, body: bodies[i], data });
+    } catch (err) {
+      results.push({ ok: false, body: bodies[i], error: err });
+    }
+    if (onProgress) onProgress(i + 1, bodies.length);
   }
   return results;
 }
@@ -1473,22 +1484,31 @@ urgentModalSave.addEventListener("click", async () => {
     Array.from(urgentModalList.querySelectorAll("input[type=checkbox]:checked")).map((cb) => cb.value)
   );
   const changed = activeProjects().filter((p) => Boolean(p.urgent) !== checked.has(p.id));
+  if (changed.length === 0) {
+    closeUrgentModal();
+    return;
+  }
   urgentModalSave.disabled = true;
-  urgentModalSave.textContent = "Kaydediliyor…";
-  try {
-    await postToSheetSequential(
-      changed.map((p) => ({ action: "update", id: p.id, patch: { urgent: checked.has(p.id) } }))
+  const results = await postToSheetSequential(
+    changed.map((p) => ({ action: "update", id: p.id, patch: { urgent: checked.has(p.id) } })),
+    (done, total) => (urgentModalSave.textContent = `Kaydediliyor… (${done}/${total})`)
+  );
+  results.forEach((r, i) => {
+    if (r.ok) changed[i].urgent = checked.has(changed[i].id);
+  });
+  recomputeUrgentInactiveSets();
+  refreshProjectMarkers();
+  urgentModalSave.disabled = false;
+  urgentModalSave.textContent = "Kaydet";
+  const failed = results.filter((r) => !r.ok);
+  if (failed.length > 0) {
+    alert(
+      `${results.length - failed.length}/${results.length} kaydedildi. ${failed.length} proje kaydedilemedi (Sheet yoğun olabilir) — pencereyi tekrar açıp deneyebilirsin.`
     );
-    changed.forEach((p) => (p.urgent = checked.has(p.id)));
-    recomputeUrgentInactiveSets();
-    refreshProjectMarkers();
+    renderUrgentModalList();
+  } else {
     closeUrgentModal();
     runSearch();
-  } catch (err) {
-    alert("Kaydedilemedi — internet bağlantısını kontrol edip tekrar dene.");
-  } finally {
-    urgentModalSave.disabled = false;
-    urgentModalSave.textContent = "Kaydet";
   }
 });
 
@@ -1539,23 +1559,32 @@ inactiveModalSave.addEventListener("click", async () => {
     Array.from(inactiveModalList.querySelectorAll("input[type=checkbox]:checked")).map((cb) => cb.value)
   );
   const changed = ANKARA_DATA.projects.filter((p) => Boolean(p.active) !== activeIds.has(p.id));
+  if (changed.length === 0) {
+    closeInactiveModal();
+    return;
+  }
   inactiveModalSave.disabled = true;
-  inactiveModalSave.textContent = "Kaydediliyor…";
-  try {
-    await postToSheetSequential(
-      changed.map((p) => ({ action: "update", id: p.id, patch: { active: activeIds.has(p.id) } }))
+  const results = await postToSheetSequential(
+    changed.map((p) => ({ action: "update", id: p.id, patch: { active: activeIds.has(p.id) } })),
+    (done, total) => (inactiveModalSave.textContent = `Kaydediliyor… (${done}/${total})`)
+  );
+  results.forEach((r, i) => {
+    if (r.ok) changed[i].active = activeIds.has(changed[i].id);
+  });
+  recomputeUrgentInactiveSets();
+  refreshProjectMarkers();
+  rebuildProjectSelect();
+  inactiveModalSave.disabled = false;
+  inactiveModalSave.textContent = "Kaydet";
+  const failed = results.filter((r) => !r.ok);
+  if (failed.length > 0) {
+    alert(
+      `${results.length - failed.length}/${results.length} kaydedildi. ${failed.length} proje kaydedilemedi (Sheet yoğun olabilir) — pencereyi tekrar açıp deneyebilirsin.`
     );
-    changed.forEach((p) => (p.active = activeIds.has(p.id)));
-    recomputeUrgentInactiveSets();
-    refreshProjectMarkers();
-    rebuildProjectSelect();
+    renderInactiveModalList();
+  } else {
     closeInactiveModal();
     runSearch();
-  } catch (err) {
-    alert("Kaydedilemedi — internet bağlantısını kontrol edip tekrar dene.");
-  } finally {
-    inactiveModalSave.disabled = false;
-    inactiveModalSave.textContent = "Kaydet";
   }
 });
 
