@@ -5,12 +5,100 @@
  */
 
 // ---------------------------------------------------------------------------
+// 0) PAYLAŞIMLI PROJE VERİTABANI (Google Sheets + Apps Script)
+// ---------------------------------------------------------------------------
+// Proje listesi artık data.js'teki statik listeyle SINIRLI değil: sayfa
+// açılışında paylaşımlı bir Google Sheet'ten canlı olarak çekilir, böylece
+// İK ekibindeki herkes (hangi bilgisayardan girerse girsin) aynı güncel
+// listeyi görür ve "Proje Ekle"/"Acil"/"Aç-Kapa" değişiklikleri herkese
+// yansır. data.js'teki liste yalnızca ilk yükleme anında (Sheet'e henüz
+// ulaşılamadıysa) çevrimdışı bir yedek olarak kullanılır.
+const SHEET_API_URL = "https://script.google.com/macros/s/AKfycbxprctzoQPNbHz1kA3g4qQciSZ9hqIGtN_BC_q0YzSEvOmUGYxW9PKWTTpA7z6SoPw/exec";
+const SHEET_CACHE_KEY = "ik_ulasim_sheet_cache_v1";
+
+// data.js'teki statik projelerde henüz urgent/active alanı yok — bunları
+// eski (ANKARA_DATA.urgentProjectIds / referral==="Aktif değil") mantığından
+// türeterek her projeye ekliyoruz; Sheet'ten canlı veri geldiğinde bu
+// alanların üzerine (Sheet'teki gerçek değerlerle) yazılır.
+(function seedStaticActiveUrgentFields() {
+  const staticUrgentIds = new Set(ANKARA_DATA.urgentProjectIds || []);
+  ANKARA_DATA.projects.forEach((p) => {
+    if (p.urgent === undefined) p.urgent = staticUrgentIds.has(p.id);
+    if (p.active === undefined) p.active = p.referral !== "Aktif değil";
+  });
+})();
+
+// URGENT_PROJECT_IDS / INACTIVE_PROJECT_IDS artık projelerin kendi
+// urgent/active alanlarından TÜRETİLİR (Sheet = tek doğruluk kaynağı).
+// Modallardan kaydedince önce Sheet'e yazılır, sonra bu setler yenilenir.
+let URGENT_PROJECT_IDS = new Set();
+let INACTIVE_PROJECT_IDS = new Set();
+function recomputeUrgentInactiveSets() {
+  URGENT_PROJECT_IDS = new Set(ANKARA_DATA.projects.filter((p) => p.urgent).map((p) => p.id));
+  INACTIVE_PROJECT_IDS = new Set(ANKARA_DATA.projects.filter((p) => !p.active).map((p) => p.id));
+}
+recomputeUrgentInactiveSets();
+
+function activeProjects() {
+  return ANKARA_DATA.projects.filter((p) => !INACTIVE_PROJECT_IDS.has(p.id));
+}
+
+// Apps Script'e yazma isteği gönderir. Content-Type kasıtlı olarak
+// "text/plain" — Apps Script Web App'leri tarayıcının CORS ön-kontrol
+// (preflight OPTIONS) isteğini desteklemiyor; "application/json" kullanmak
+// tarayıcının otomatik preflight göndermesine ve isteğin başarısız olmasına
+// yol açardı. Gövde yine de geçerli JSON metni olarak gönderilir.
+async function postToSheet(body) {
+  const res = await fetch(SHEET_API_URL, {
+    method: "POST",
+    headers: { "Content-Type": "text/plain;charset=utf-8" },
+    body: JSON.stringify(body),
+  });
+  const data = await res.json();
+  if (!data.ok) throw new Error(data.error || "Sheet isteği başarısız");
+  return data;
+}
+
+// transitStops kendi lat/lng'sini taşımıyor (sadece id/name/mode) — bir
+// durağın yaklaşık konumunu, o durağı accessStopId olarak kullanan
+// ilçe/mahalle ve projelerin konumlarından türetiyoruz.
+let stopApproxCoordsCache = null;
+function stopApproxCoords() {
+  if (stopApproxCoordsCache) return stopApproxCoordsCache;
+  const map = {};
+  const add = (stopId, lat, lng) => {
+    if (!stopId || map[stopId]) return;
+    map[stopId] = { lat, lng };
+  };
+  ANKARA_DATA.districts.forEach((d) => {
+    add(d.accessStopId, d.lat, d.lng);
+    (d.neighborhoods || []).forEach((n) => add(n.accessStopId, n.lat, n.lng));
+  });
+  ANKARA_DATA.projects.forEach((p) => add(p.accessStopId, p.lat, p.lng));
+  stopApproxCoordsCache = map;
+  return map;
+}
+
+/** Basit haversine ile en yakın gerçek durağı bulur — yeni eklenen bir proje için otomatik durak ataması. */
+function nearestTransitStop(lat, lng) {
+  const coords = stopApproxCoords();
+  let best = null;
+  let bestDist = Infinity;
+  ANKARA_DATA.transitStops.forEach((s) => {
+    const c = coords[s.id];
+    if (!c) return;
+    const d = haversineKm({ lat, lng }, c);
+    if (d < bestDist) {
+      bestDist = d;
+      best = s;
+    }
+  });
+  return best;
+}
+
+// ---------------------------------------------------------------------------
 // 1) YARDIMCI ARAMA TABLOLARI
 // ---------------------------------------------------------------------------
-
-// Hangi projelerin "ACİL" rozetiyle öne çıkarılacağı data.js ->
-// ANKARA_DATA.urgentProjectIds listesinden okunur (haftalık güncellenir).
-const URGENT_PROJECT_IDS = new Set(ANKARA_DATA.urgentProjectIds || []);
 
 const stopsById = Object.fromEntries(ANKARA_DATA.transitStops.map((s) => [s.id, s]));
 const linesByStopId = {}; // stopId -> [lineId, ...]
@@ -269,6 +357,10 @@ const TransitCache = {
   set(key, value) {
     this._load();
     this._mem[key] = value;
+    this._save();
+  },
+  clearAll() {
+    this._mem = {};
     this._save();
   },
 };
@@ -595,13 +687,21 @@ function rankProjectsForOrigin(originId, thresholdMin = null) {
   const origin = originById(originId);
   if (!origin) return [];
 
-  const rows = ANKARA_DATA.projects.map((p) => {
+  const rows = activeProjects().map((p) => {
     const dest = projectById(p.id);
     const estimate = getTransitEstimate(originId, origin, p.id, dest);
     return { project: p, origin, ...estimate };
   });
 
-  rows.sort((a, b) => a.durationMin - b.durationMin);
+  // Acil projeler, mesafe/süre ne olursa olsun listenin en üstünde çıkar
+  // (haftalık acil kadroların önce görülüp ilerletilmesi için); acil olanlar
+  // kendi aralarında yine süreye göre sıralanır.
+  rows.sort((a, b) => {
+    const aUrgent = URGENT_PROJECT_IDS.has(a.project.id) ? 1 : 0;
+    const bUrgent = URGENT_PROJECT_IDS.has(b.project.id) ? 1 : 0;
+    if (aUrgent !== bUrgent) return bUrgent - aUrgent;
+    return a.durationMin - b.durationMin;
+  });
   return thresholdMin ? rows.filter((r) => r.durationMin <= thresholdMin) : rows;
 }
 
@@ -730,14 +830,47 @@ const projectCluster = L.markerClusterGroup({
 });
 
 const projectMarkersById = {};
-ANKARA_DATA.projects.forEach((p) => {
+
+function buildProjectMarker(p) {
   const isUrgent = URGENT_PROJECT_IDS.has(p.id);
   const m = L.marker([p.lat, p.lng], { icon: isUrgent ? urgentProjectIcon : projectIcon });
   m.bindTooltip(`${isUrgent ? "🔴 ACİL — " : ""}${p.name} — ${p.address}`, { direction: "top" });
-  projectCluster.addLayer(m);
   projectMarkersById[p.id] = m;
-});
+  if (!INACTIVE_PROJECT_IDS.has(p.id)) {
+    projectCluster.addLayer(m);
+  }
+  return m;
+}
+ANKARA_DATA.projects.forEach(buildProjectMarker);
 map.addLayer(projectCluster);
+
+// Proje listesi kökten değiştiğinde (Sheet'ten canlı veri geldiğinde ya da
+// yeni bir proje eklendiğinde) tüm pinleri sıfırdan kurar.
+function rebuildAllProjectMarkers() {
+  projectCluster.clearLayers();
+  Object.keys(projectMarkersById).forEach((id) => delete projectMarkersById[id]);
+  ANKARA_DATA.projects.forEach(buildProjectMarker);
+}
+
+// Acil/aktiflik seçimi değiştiğinde (modal'dan kaydedince) harita pinlerini/
+// tooltip'lerini ve kümedeki üyeliğini yeniden hesaplar — sayfayı
+// yenilemeye gerek kalmaz. Kapalı projelerin pini haritada hiç görünmez.
+function refreshProjectMarkers() {
+  ANKARA_DATA.projects.forEach((p) => {
+    const marker = projectMarkersById[p.id];
+    if (!marker) return;
+    const isActive = !INACTIVE_PROJECT_IDS.has(p.id);
+    const isUrgent = URGENT_PROJECT_IDS.has(p.id);
+    marker.setIcon(isUrgent ? urgentProjectIcon : projectIcon);
+    marker.setTooltipContent(`${isUrgent ? "🔴 ACİL — " : ""}${p.name} — ${p.address}`);
+    const inCluster = projectCluster.hasLayer(marker);
+    if (isActive && !inCluster) {
+      projectCluster.addLayer(marker);
+    } else if (!isActive && inCluster) {
+      projectCluster.removeLayer(marker);
+    }
+  });
+}
 
 // ---- DOM referansları ----
 const modeButtons = document.querySelectorAll(".mode-btn");
@@ -789,26 +922,39 @@ ANKARA_DATA.districts.forEach((d) => {
   originSelect.appendChild(optGroup);
 });
 
-const projectsBySector = {};
-ANKARA_DATA.projects.forEach((p) => {
-  (projectsBySector[p.sector] = projectsBySector[p.sector] || []).push(p);
-});
-Object.keys(projectsBySector)
-  .sort()
-  .forEach((sector) => {
-    const optGroup = document.createElement("optgroup");
-    optGroup.label = sector;
-    projectsBySector[sector]
-      .slice()
-      .sort((a, b) => a.name.localeCompare(b.name, "tr"))
-      .forEach((p) => {
-        const opt = document.createElement("option");
-        opt.value = p.id;
-        opt.textContent = `${p.name} — ${p.address}`;
-        optGroup.appendChild(opt);
-      });
-    projectSelect.appendChild(optGroup);
+// Kapalı (pasif) projeler bu kutuda hiç görünmez; aktiflik "Proje Aç/Kapa"
+// penceresinden değiştirildiğinde bu fonksiyon yeniden çağrılarak kutu
+// güncel tutulur — seçili proje pasife düşerse seçim ve sonuçlar temizlenir.
+function rebuildProjectSelect() {
+  const previouslySelected = projectSelect.value;
+  projectSelect.innerHTML = '<option value="">Seçiniz…</option>';
+
+  const projectsBySector = {};
+  activeProjects().forEach((p) => {
+    (projectsBySector[p.sector] = projectsBySector[p.sector] || []).push(p);
   });
+  Object.keys(projectsBySector)
+    .sort()
+    .forEach((sector) => {
+      const optGroup = document.createElement("optgroup");
+      optGroup.label = sector;
+      projectsBySector[sector]
+        .slice()
+        .sort((a, b) => a.name.localeCompare(b.name, "tr"))
+        .forEach((p) => {
+          const opt = document.createElement("option");
+          opt.value = p.id;
+          opt.textContent = `${p.name} — ${p.address}`;
+          optGroup.appendChild(opt);
+        });
+      projectSelect.appendChild(optGroup);
+    });
+
+  if (previouslySelected && !INACTIVE_PROJECT_IDS.has(previouslySelected)) {
+    projectSelect.value = previouslySelected;
+  }
+}
+rebuildProjectSelect();
 
 // ---- Mod değişimi ----
 modeButtons.forEach((btn) => {
@@ -1086,6 +1232,9 @@ function buildResultCard({ title, subtitle, durationMin, transfers, bucket, onCl
   const card = document.createElement("button");
   card.className = `result-card ${highlight ? "result-card-active" : ""} ${urgent ? "result-card-urgent" : ""}`;
   const referralRow = referral ? `<div class="result-card-referral">📌 ${referral}</div>` : "";
+  const servisNote = terms && terms.transport === "Servis"
+    ? `<div class="result-card-servis-note">🚐 Bu projede firma servisi var — yukarıdaki süre/aktarma toplu taşıma senaryosuna göredir, gerçek servis güzergahı sisteme kayıtlı değil.</div>`
+    : "";
   const genderSpan = terms && terms.gender ? `<span>👤 ${terms.gender}</span>` : "";
   const termsRow = terms
     ? `<div class="result-card-terms">
@@ -1111,6 +1260,7 @@ function buildResultCard({ title, subtitle, durationMin, transfers, bucket, onCl
     </div>
     ${referralRow}
     ${termsRow}
+    ${servisNote}
   `;
   card.addEventListener("click", () => {
     document.querySelectorAll(".result-card").forEach((c) => c.classList.remove("result-card-active"));
@@ -1266,5 +1416,265 @@ function showRouteResult(estimate) {
   routeDetail.classList.remove("hidden");
 }
 
+// ---------------------------------------------------------------------------
+// 7) HAFTALIK ACİL PROJELER PENCERESİ
+// ---------------------------------------------------------------------------
+
+const urgentBtn = document.getElementById("urgentBtn");
+const urgentModal = document.getElementById("urgentModal");
+const urgentModalList = document.getElementById("urgentModalList");
+const urgentModalClose = document.getElementById("urgentModalClose");
+const urgentModalCancel = document.getElementById("urgentModalCancel");
+const urgentModalSave = document.getElementById("urgentModalSave");
+
+function renderUrgentModalList() {
+  const sorted = activeProjects().sort((a, b) => a.name.localeCompare(b.name, "tr"));
+  urgentModalList.innerHTML = sorted
+    .map(
+      (p) => `
+      <label class="urgent-modal-row">
+        <input type="checkbox" value="${p.id}" ${URGENT_PROJECT_IDS.has(p.id) ? "checked" : ""} />
+        <span>${p.name} <span class="text-slate-400">— ${p.address}</span></span>
+      </label>`
+    )
+    .join("");
+}
+
+function openUrgentModal() {
+  renderUrgentModalList();
+  urgentModal.classList.remove("hidden");
+}
+function closeUrgentModal() {
+  urgentModal.classList.add("hidden");
+}
+
+urgentBtn.addEventListener("click", openUrgentModal);
+urgentModalClose.addEventListener("click", closeUrgentModal);
+urgentModalCancel.addEventListener("click", closeUrgentModal);
+urgentModal.addEventListener("click", (e) => {
+  if (e.target === urgentModal) closeUrgentModal();
+});
+
+urgentModalSave.addEventListener("click", async () => {
+  const checked = new Set(
+    Array.from(urgentModalList.querySelectorAll("input[type=checkbox]:checked")).map((cb) => cb.value)
+  );
+  const changed = activeProjects().filter((p) => Boolean(p.urgent) !== checked.has(p.id));
+  urgentModalSave.disabled = true;
+  urgentModalSave.textContent = "Kaydediliyor…";
+  try {
+    await Promise.all(
+      changed.map((p) => postToSheet({ action: "update", id: p.id, patch: { urgent: checked.has(p.id) } }))
+    );
+    changed.forEach((p) => (p.urgent = checked.has(p.id)));
+    recomputeUrgentInactiveSets();
+    refreshProjectMarkers();
+    closeUrgentModal();
+    runSearch();
+  } catch (err) {
+    alert("Kaydedilemedi — internet bağlantısını kontrol edip tekrar dene.");
+  } finally {
+    urgentModalSave.disabled = false;
+    urgentModalSave.textContent = "Kaydet";
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 8) HAFTALIK PROJE AÇ/KAPA PENCERESİ
+// ---------------------------------------------------------------------------
+
+const inactiveBtn = document.getElementById("inactiveBtn");
+const inactiveModal = document.getElementById("inactiveModal");
+const inactiveModalList = document.getElementById("inactiveModalList");
+const inactiveModalClose = document.getElementById("inactiveModalClose");
+const inactiveModalCancel = document.getElementById("inactiveModalCancel");
+const inactiveModalSave = document.getElementById("inactiveModalSave");
+
+// Burada — acil pencerenin aksine — TÜM projeler (kapalı olanlar dahil)
+// listelenir, aksi halde kapatılmış bir projeyi geri açmanın yolu olmazdı.
+function renderInactiveModalList() {
+  const sorted = [...ANKARA_DATA.projects].sort((a, b) => a.name.localeCompare(b.name, "tr"));
+  inactiveModalList.innerHTML = sorted
+    .map(
+      (p) => `
+      <label class="urgent-modal-row">
+        <input type="checkbox" value="${p.id}" ${!INACTIVE_PROJECT_IDS.has(p.id) ? "checked" : ""} />
+        <span>${p.name} <span class="text-slate-400">— ${p.address}</span></span>
+      </label>`
+    )
+    .join("");
+}
+
+function openInactiveModal() {
+  renderInactiveModalList();
+  inactiveModal.classList.remove("hidden");
+}
+function closeInactiveModal() {
+  inactiveModal.classList.add("hidden");
+}
+
+inactiveBtn.addEventListener("click", openInactiveModal);
+inactiveModalClose.addEventListener("click", closeInactiveModal);
+inactiveModalCancel.addEventListener("click", closeInactiveModal);
+inactiveModal.addEventListener("click", (e) => {
+  if (e.target === inactiveModal) closeInactiveModal();
+});
+
+inactiveModalSave.addEventListener("click", async () => {
+  // Kutucuk işaretliyse AKTİF demektir; işaretsiz olanlar pasif listesine girer.
+  const activeIds = new Set(
+    Array.from(inactiveModalList.querySelectorAll("input[type=checkbox]:checked")).map((cb) => cb.value)
+  );
+  const changed = ANKARA_DATA.projects.filter((p) => Boolean(p.active) !== activeIds.has(p.id));
+  inactiveModalSave.disabled = true;
+  inactiveModalSave.textContent = "Kaydediliyor…";
+  try {
+    await Promise.all(
+      changed.map((p) => postToSheet({ action: "update", id: p.id, patch: { active: activeIds.has(p.id) } }))
+    );
+    changed.forEach((p) => (p.active = activeIds.has(p.id)));
+    recomputeUrgentInactiveSets();
+    refreshProjectMarkers();
+    rebuildProjectSelect();
+    closeInactiveModal();
+    runSearch();
+  } catch (err) {
+    alert("Kaydedilemedi — internet bağlantısını kontrol edip tekrar dene.");
+  } finally {
+    inactiveModalSave.disabled = false;
+    inactiveModalSave.textContent = "Kaydet";
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 9) SHEET'TEN CANLI PROJE LİSTESİ ÇEKME
+// ---------------------------------------------------------------------------
+
+// Proje listesini tamamen yeni bir kaynakla (Sheet'ten gelen veya yeni bir
+// proje eklendikten sonraki hal) değiştirir: ANKARA_DATA.projects'i günceller,
+// türetilmiş setleri/harita pinlerini/dropdown'ı yeniden kurar ve artık
+// güncelliğini yitirmiş olabilecek rota tahminlerini (TransitCache) temizler.
+function applyLiveProjects(projects) {
+  ANKARA_DATA.projects.length = 0;
+  projects.forEach((p) => ANKARA_DATA.projects.push(p));
+  stopApproxCoordsCache = null;
+  recomputeUrgentInactiveSets();
+  rebuildAllProjectMarkers();
+  rebuildProjectSelect();
+  TransitCache.clearAll();
+  if (currentMode === "origin-to-project" && originSelect.value) {
+    runSearch();
+  } else if (currentMode === "project-to-origin" && projectSelect.value && !activeProjects().some((p) => p.id === projectSelect.value)) {
+    clearResults();
+  } else {
+    runSearch();
+  }
+}
+
+async function loadLiveProjects() {
+  try {
+    const cached = JSON.parse(localStorage.getItem(SHEET_CACHE_KEY) || "null");
+    if (Array.isArray(cached) && cached.length) {
+      applyLiveProjects(cached);
+    }
+  } catch {
+    // önbellek okunamadı, statik veriyle devam
+  }
+  try {
+    const res = await fetch(SHEET_API_URL);
+    const data = await res.json();
+    if (data.ok && Array.isArray(data.projects) && data.projects.length) {
+      applyLiveProjects(data.projects);
+      try {
+        localStorage.setItem(SHEET_CACHE_KEY, JSON.stringify(data.projects));
+      } catch {
+        /* localStorage kullanılamıyorsa sessizce yoksay */
+      }
+    }
+  } catch {
+    // Sheet'e ulaşılamadı (internet yok, henüz kurulmadı vb.) — statik/önbellek veriyle sessizce devam
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 10) PROJE EKLE PENCERESİ
+// ---------------------------------------------------------------------------
+
+const addProjectBtn = document.getElementById("addProjectBtn");
+const addProjectModal = document.getElementById("addProjectModal");
+const addProjectForm = document.getElementById("addProjectForm");
+const addProjectClose = document.getElementById("addProjectClose");
+const addProjectCancel = document.getElementById("addProjectCancel");
+const addProjectSubmit = document.getElementById("addProjectSubmit");
+const addProjectStatus = document.getElementById("addProjectStatus");
+
+function openAddProjectModal() {
+  addProjectForm.reset();
+  addProjectStatus.textContent = "";
+  addProjectModal.classList.remove("hidden");
+}
+function closeAddProjectModal() {
+  addProjectModal.classList.add("hidden");
+}
+
+addProjectBtn.addEventListener("click", openAddProjectModal);
+addProjectClose.addEventListener("click", closeAddProjectModal);
+addProjectCancel.addEventListener("click", closeAddProjectModal);
+addProjectModal.addEventListener("click", (e) => {
+  if (e.target === addProjectModal) closeAddProjectModal();
+});
+
+addProjectForm.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const fd = new FormData(addProjectForm);
+  const name = fd.get("name").trim();
+  const addressText = fd.get("address").trim();
+  if (!name || !addressText) return;
+
+  addProjectSubmit.disabled = true;
+  addProjectStatus.textContent = "Konum bulunuyor…";
+  try {
+    const geo = await geocodeAddress(addressText);
+    if (!geo) {
+      addProjectStatus.textContent = "Konum bulunamadı. Adresi biraz daha netleştirip tekrar dene (ör. \"Bilkent, Çankaya\").";
+      return;
+    }
+    const stop = nearestTransitStop(geo.lat, geo.lng);
+    addProjectStatus.textContent = "Kaydediliyor…";
+
+    const project = {
+      name,
+      sector: fd.get("sector"),
+      address: addressText,
+      lat: geo.lat,
+      lng: geo.lng,
+      accessStopId: stop ? stop.id : "",
+      shift: fd.get("shift").trim(),
+      salary: fd.get("salary").trim(),
+      meal: fd.get("meal").trim(),
+      transport: fd.get("transport").trim(),
+      referral: fd.get("referral").trim(),
+      gender: fd.get("gender"),
+      urgent: false,
+      active: true,
+    };
+
+    const result = await postToSheet({ action: "add", project });
+    project.id = result.id;
+    ANKARA_DATA.projects.push(project);
+    stopApproxCoordsCache = null;
+    recomputeUrgentInactiveSets();
+    buildProjectMarker(project);
+    rebuildProjectSelect();
+    closeAddProjectModal();
+    if (currentMode === "origin-to-project" && originSelect.value) runSearch();
+  } catch (err) {
+    addProjectStatus.textContent = "Kaydedilemedi — internet bağlantısını kontrol edip tekrar dene.";
+  } finally {
+    addProjectSubmit.disabled = false;
+  }
+});
+
 // İlk yükleme
 clearResults();
+loadLiveProjects();

@@ -75,6 +75,11 @@
   .result-card-referral {
     margin-top: 0.4rem; font-size: 0.68rem; font-weight: 600; color: #6366f1;
   }
+  .result-card-servis-note {
+    margin-top: 0.4rem; font-size: 0.68rem; font-weight: 600; color: #0f766e;
+    background: #f0fdfa; border: 1px solid #99f6e4; border-radius: 0.4rem;
+    padding: 0.25rem 0.5rem;
+  }
 
   #routeDetail { border: 1px solid #e2e8f0; border-radius: 0.75rem; background: white; }
   .route-step { display: flex; align-items: flex-start; gap: 0.55rem; padding: 0.4rem 0; }
@@ -123,6 +128,13 @@
     display: flex; align-items: center; justify-content: center;
     box-shadow: 0 2px 6px rgba(79,70,229,.5);
   }
+
+  .urgent-modal-row {
+    display: flex; align-items: flex-start; gap: 0.5rem; font-size: 0.78rem;
+    color: #334155; padding: 0.35rem 0.4rem; border-radius: 0.4rem; cursor: pointer;
+  }
+  .urgent-modal-row:hover { background: #f8fafc; }
+  .urgent-modal-row input { margin-top: 3px; shrink: 0; }
 </style>
 </head>
 <body class="bg-slate-50">
@@ -130,11 +142,18 @@
 <div class="flex h-screen w-screen overflow-hidden">
 
   <!-- SOL PANEL -->
-  <aside class="w-[400px] shrink-0 flex flex-col border-r border-slate-200 bg-white">
+  <aside class="w-[400px] shrink-0 flex flex-col border-r border-slate-200" style="background-image: linear-gradient(rgba(255,255,255,.15), rgba(255,255,255,.15)), url('assets/sidebar-bg.jpg'); background-size: cover; background-position: top center; background-repeat: no-repeat;">
 
-    <header class="px-5 pt-3 pb-2 border-b border-slate-100">
-      <h1 class="text-base font-bold text-slate-800">Ulaşım &amp; Proje Eşleştirme</h1>
-      <p class="text-[11px] text-slate-500 mt-0.5">İK saha personeli işe alım — Ankara toplu taşıma modülü</p>
+    <header class="px-5 pt-3 pb-2 border-b border-slate-100 flex items-start justify-between gap-2">
+      <div class="min-w-0">
+        <h1 class="text-base font-bold text-slate-800">Ulaşım &amp; Proje Eşleştirme</h1>
+        <p class="text-[11px] text-slate-500 mt-0.5">İK saha personeli işe alım — Ankara toplu taşıma modülü</p>
+      </div>
+      <div class="shrink-0 flex flex-col gap-1">
+        <button id="urgentBtn" class="text-[11px] font-bold px-2.5 py-1.5 rounded-lg bg-red-600 hover:bg-red-700 text-white transition whitespace-nowrap">🔥 Acil Projeler</button>
+        <button id="inactiveBtn" class="text-[11px] font-bold px-2.5 py-1.5 rounded-lg bg-slate-700 hover:bg-slate-800 text-white transition whitespace-nowrap">🔧 Proje Aç/Kapa</button>
+        <button id="addProjectBtn" class="text-[11px] font-bold px-2.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white transition whitespace-nowrap">➕ Proje Ekle</button>
+      </div>
     </header>
 
     <div class="px-5 pt-2 pb-2 border-b border-slate-100">
@@ -234,7 +253,106 @@
   </main>
 </div>
 
-<script src="data.js?v=26"></script>
-<script src="app.js?v=26"></script>
+<!-- HAFTALIK ACİL PROJELER MODALI -->
+<div id="urgentModal" class="hidden fixed inset-0 bg-black/40 z-[2000] flex items-center justify-center p-6">
+  <div class="bg-white rounded-xl shadow-xl w-full max-w-md max-h-[80vh] flex flex-col">
+    <div class="flex items-center justify-between px-4 py-3 border-b border-slate-100">
+      <h2 class="text-sm font-bold text-slate-800">Haftalık Acil Projeler</h2>
+      <button id="urgentModalClose" class="text-slate-400 hover:text-slate-600 text-lg leading-none">&times;</button>
+    </div>
+    <p class="text-[11px] text-slate-500 px-4 pt-2 leading-snug">Seçilen projeler, mesafe/süre fark etmeksizin sonuç listesinin en üstünde çıkar ve haritada kırmızı pinle gösterilir.</p>
+    <div id="urgentModalList" class="flex-1 overflow-y-auto px-4 py-2 mt-1"></div>
+    <div class="flex justify-end gap-2 px-4 py-3 border-t border-slate-100">
+      <button id="urgentModalCancel" class="px-3 py-1.5 rounded-lg text-sm font-semibold text-slate-600 hover:bg-slate-100">Vazgeç</button>
+      <button id="urgentModalSave" class="px-3 py-1.5 rounded-lg text-sm font-semibold bg-indigo-600 hover:bg-indigo-700 text-white">Kaydet</button>
+    </div>
+  </div>
+</div>
+
+<!-- HAFTALIK PROJE AÇ/KAPA MODALI -->
+<div id="inactiveModal" class="hidden fixed inset-0 bg-black/40 z-[2000] flex items-center justify-center p-6">
+  <div class="bg-white rounded-xl shadow-xl w-full max-w-md max-h-[80vh] flex flex-col">
+    <div class="flex items-center justify-between px-4 py-3 border-b border-slate-100">
+      <h2 class="text-sm font-bold text-slate-800">Proje Aç/Kapa</h2>
+      <button id="inactiveModalClose" class="text-slate-400 hover:text-slate-600 text-lg leading-none">&times;</button>
+    </div>
+    <p class="text-[11px] text-slate-500 px-4 pt-2 leading-snug">İşareti kaldırılan projeler o hafta kapalı sayılır — sonuç listelerinde, proje seçim kutusunda ve haritada görünmez.</p>
+    <div id="inactiveModalList" class="flex-1 overflow-y-auto px-4 py-2 mt-1"></div>
+    <div class="flex justify-end gap-2 px-4 py-3 border-t border-slate-100">
+      <button id="inactiveModalCancel" class="px-3 py-1.5 rounded-lg text-sm font-semibold text-slate-600 hover:bg-slate-100">Vazgeç</button>
+      <button id="inactiveModalSave" class="px-3 py-1.5 rounded-lg text-sm font-semibold bg-indigo-600 hover:bg-indigo-700 text-white">Kaydet</button>
+    </div>
+  </div>
+</div>
+
+<!-- PROJE EKLE MODALI -->
+<div id="addProjectModal" class="hidden fixed inset-0 bg-black/40 z-[2000] flex items-center justify-center p-6">
+  <div class="bg-white rounded-xl shadow-xl w-full max-w-md max-h-[85vh] flex flex-col">
+    <div class="flex items-center justify-between px-4 py-3 border-b border-slate-100">
+      <h2 class="text-sm font-bold text-slate-800">Yeni Proje Ekle</h2>
+      <button id="addProjectClose" class="text-slate-400 hover:text-slate-600 text-lg leading-none">&times;</button>
+    </div>
+    <form id="addProjectForm" class="flex-1 overflow-y-auto px-4 py-3 space-y-2.5">
+      <p class="text-[11px] text-slate-500 leading-snug">Adres girince konum otomatik bulunur ve en yakın gerçek durak otomatik atanır (kesin doğruluk için İK daha sonra kontrol edebilir). Kaydedilen proje herkesle paylaşılır.</p>
+      <div>
+        <label class="text-xs font-semibold text-slate-600">Proje Adı *</label>
+        <input name="name" required class="mt-1 w-full border border-slate-200 rounded-lg px-3 py-1.5 text-sm text-slate-700" />
+      </div>
+      <div>
+        <label class="text-xs font-semibold text-slate-600">Sektör</label>
+        <select name="sector" class="mt-1 w-full border border-slate-200 rounded-lg px-3 py-1.5 text-sm text-slate-700 bg-white">
+          <option value="Temizlik">Temizlik</option>
+          <option value="Güvenlik">Güvenlik</option>
+          <option value="Çağrı Merkezi">Çağrı Merkezi</option>
+          <option value="Yönetim">Yönetim</option>
+        </select>
+      </div>
+      <div>
+        <label class="text-xs font-semibold text-slate-600">Adres *</label>
+        <input name="address" required placeholder="ör. Bilkent, Çankaya" class="mt-1 w-full border border-slate-200 rounded-lg px-3 py-1.5 text-sm text-slate-700" />
+      </div>
+      <div class="grid grid-cols-2 gap-2">
+        <div>
+          <label class="text-xs font-semibold text-slate-600">Çalışma Saati</label>
+          <input name="shift" placeholder="8.00-18.00" class="mt-1 w-full border border-slate-200 rounded-lg px-3 py-1.5 text-sm text-slate-700" />
+        </div>
+        <div>
+          <label class="text-xs font-semibold text-slate-600">Cinsiyet</label>
+          <select name="gender" class="mt-1 w-full border border-slate-200 rounded-lg px-3 py-1.5 text-sm text-slate-700 bg-white">
+            <option value="Kadın/Erkek">Kadın/Erkek</option>
+            <option value="Kadın">Kadın</option>
+            <option value="Erkek">Erkek</option>
+          </select>
+        </div>
+      </div>
+      <div class="grid grid-cols-3 gap-2">
+        <div>
+          <label class="text-xs font-semibold text-slate-600">Maaş</label>
+          <input name="salary" placeholder="28.000₺" class="mt-1 w-full border border-slate-200 rounded-lg px-3 py-1.5 text-sm text-slate-700" />
+        </div>
+        <div>
+          <label class="text-xs font-semibold text-slate-600">Yemek</label>
+          <input name="meal" placeholder="Yemekhane" class="mt-1 w-full border border-slate-200 rounded-lg px-3 py-1.5 text-sm text-slate-700" />
+        </div>
+        <div>
+          <label class="text-xs font-semibold text-slate-600">Yol</label>
+          <input name="transport" placeholder="Servis" class="mt-1 w-full border border-slate-200 rounded-lg px-3 py-1.5 text-sm text-slate-700" />
+        </div>
+      </div>
+      <div>
+        <label class="text-xs font-semibold text-slate-600">Yönlendirme</label>
+        <input name="referral" placeholder="Ofise davet>İSG" class="mt-1 w-full border border-slate-200 rounded-lg px-3 py-1.5 text-sm text-slate-700" />
+      </div>
+      <div id="addProjectStatus" class="text-[11px] text-slate-500 leading-snug"></div>
+    </form>
+    <div class="flex justify-end gap-2 px-4 py-3 border-t border-slate-100">
+      <button id="addProjectCancel" type="button" class="px-3 py-1.5 rounded-lg text-sm font-semibold text-slate-600 hover:bg-slate-100">Vazgeç</button>
+      <button id="addProjectSubmit" type="submit" form="addProjectForm" class="px-3 py-1.5 rounded-lg text-sm font-semibold bg-emerald-600 hover:bg-emerald-700 text-white">Kaydet</button>
+    </div>
+  </div>
+</div>
+
+<script src="data.js?v=31"></script>
+<script src="app.js?v=31"></script>
 </body>
 </html>
