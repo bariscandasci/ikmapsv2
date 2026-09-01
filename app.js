@@ -59,28 +59,17 @@ async function postToSheet(body) {
   return data;
 }
 
-// Birden fazla yazma isteğini PARALEL değil SIRAYLA gönderir. Apps Script
-// tarafında da bir kilit (LockService) var, ama aynı anda çok sayıda isteği
-// paralel ateşlemek gereksiz yere kilit çakışmasına/kuyruklamaya yol açar —
-// modallardan toplu kaydetme (ör. birden fazla proje aynı anda aç/kapa)
-// bu yüzden burada tek tek, önceki bitince bir sonraki gönderilecek şekilde yapılır.
-//
-// Bir öğe başarısız olursa (ör. Sheet yoğunken zaman aşımı) kalan öğeler için
-// denemeye DEVAM eder — tek bir başarısızlık yüzünden tüm yarım kalmış bir
-// toplu kaydetmede hangi öğelerin gerçekten uygulandığı belirsiz kalmasın diye.
-// onProgress(i, total) her öğeden sonra çağrılır (arayüzde ilerleme göstermek için).
-async function postToSheetSequential(bodies, onProgress) {
-  const results = [];
-  for (let i = 0; i < bodies.length; i++) {
-    try {
-      const data = await postToSheet(bodies[i]);
-      results.push({ ok: true, body: bodies[i], data });
-    } catch (err) {
-      results.push({ ok: false, body: bodies[i], error: err });
-    }
-    if (onProgress) onProgress(i + 1, bodies.length);
-  }
-  return results;
+// Birden fazla proje güncellemesini TEK bir istekte gönderir (Apps Script
+// tarafında da tek bir Sheet okuma + tek bir Sheet yazma ile uygulanır) —
+// her öğe için ayrı bir Apps Script çalıştırması (ve her birinin ~2-3sn'lik
+// kilit/okuma/yazma maliyeti) gerekmediği için toplu Acil/Aç-Kapa
+// kaydetmelerinde çok daha hızlıdır.
+// patches: [{ id, patch }, ...]. Dönüş: { ok, updatedIds: Set, notFound: [] }.
+async function postBatchUpdate(patches) {
+  const data = await postToSheet({ action: "updateBatch", patches });
+  const notFound = new Set(data.notFound || []);
+  const updatedIds = new Set(patches.map((p) => p.id).filter((id) => !notFound.has(id)));
+  return { updatedIds, notFound: [...notFound] };
 }
 
 // transitStops kendi lat/lng'sini taşımıyor (sadece id/name/mode) — bir
@@ -1008,6 +997,13 @@ addressInput.addEventListener("keydown", (e) => {
   if (e.key === "Enter") handleAddressSearch();
 });
 
+// NOT: canlı otobüs/durak taraması (discoverNearbyTransit -> Overpass) birkaç
+// saniye sürebiliyor (Overpass yoğunken 8-10sn+). Önceden bu taramanın
+// bitmesi TÜM aramayı bloke ediyordu — kullanıcı sonuçları görmeden önce
+// uzun süre bekliyordu. Şimdi ilçe/mahalle akışındaki (enrichOriginInBackground)
+// aynı desen kullanılıyor: konum bulunur bulunmaz (en yakın gerçek durağın
+// bağlantıları ödünç alınarak) sonuçlar hemen gösterilir, canlı tarama arka
+// planda devam edip bittiğinde sonuçlar sessizce daha da iyileştirilir.
 async function handleAddressSearch() {
   const query = addressInput.value.trim();
   if (!query) return;
@@ -1020,11 +1016,14 @@ async function handleAddressSearch() {
       addressStatus.textContent = "Konum bulunamadı. Farklı bir yazımla (ör. \"Etlik Şehir Hastanesi\") deneyin.";
       return;
     }
-    addressStatus.textContent = "Yakındaki gerçek duraklar/hatlar taranıyor…";
-    const discovery = await discoverNearbyTransit(geo.lat, geo.lng);
+
     const origin = registerCustomOrigin(geo.label, geo.lat, geo.lng);
-    const addedCount = spliceDiscoveredLines(origin.stopId, discovery);
-    enrichedOriginIds.add(origin.id);
+    const nearest = nearestTransitStop(geo.lat, geo.lng);
+    if (nearest) {
+      // Canlı tarama bitene kadar en yakın gerçek durağın bağlantılarını
+      // geçici olarak kullan — böylece ilk gösterilen rotalar da anlamlı olur.
+      linesByStopId[origin.stopId] = [...(linesByStopId[nearest.id] || [])];
+    }
 
     const opt = document.createElement("option");
     opt.value = origin.id;
@@ -1032,9 +1031,18 @@ async function handleAddressSearch() {
     originSelect.insertBefore(opt, originSelect.firstChild.nextSibling);
     originSelect.value = origin.id;
 
-    addressStatus.textContent = `${discovery.lines.length} gerçek hat bulundu (${addedCount} tanesi rotaya bağlanabildi).`;
-    currentDiscoveryByOriginId[origin.id] = discovery;
+    addressStatus.textContent = "Yakındaki gerçek duraklar/hatlar taranıyor…";
     runSearch();
+
+    const discovery = await discoverNearbyTransit(geo.lat, geo.lng);
+    const addedCount = spliceDiscoveredLines(origin.stopId, discovery);
+    enrichedOriginIds.add(origin.id);
+    currentDiscoveryByOriginId[origin.id] = discovery;
+    addressStatus.textContent = `${discovery.lines.length} gerçek hat bulundu (${addedCount} tanesi rotaya bağlanabildi).`;
+    if (originSelect.value === origin.id) {
+      renderNearbyLinesPanel(origin.id);
+      if (addedCount > 0) runSearch();
+    }
   } catch (err) {
     addressStatus.textContent = "Bağlantı hatası — internet bağlantınızı kontrol edip tekrar deneyin.";
   } finally {
@@ -1488,27 +1496,35 @@ urgentModalSave.addEventListener("click", async () => {
     closeUrgentModal();
     return;
   }
+  // Çok sayıda proje aynı anda değişiyorsa (ör. yanlışlıkla toplu işaret
+  // kaldırma) onay iste — bir yarış/kaza sonucu 30+ projenin durumunun
+  // yanlışlıkla değişmesini daha önce yaşadık.
+  if (changed.length > 5 && !confirm(`${changed.length} projenin acil durumu değişecek. Emin misin?`)) {
+    return;
+  }
   urgentModalSave.disabled = true;
-  const results = await postToSheetSequential(
-    changed.map((p) => ({ action: "update", id: p.id, patch: { urgent: checked.has(p.id) } })),
-    (done, total) => (urgentModalSave.textContent = `Kaydediliyor… (${done}/${total})`)
-  );
-  results.forEach((r, i) => {
-    if (r.ok) changed[i].urgent = checked.has(changed[i].id);
-  });
-  recomputeUrgentInactiveSets();
-  refreshProjectMarkers();
-  urgentModalSave.disabled = false;
-  urgentModalSave.textContent = "Kaydet";
-  const failed = results.filter((r) => !r.ok);
-  if (failed.length > 0) {
-    alert(
-      `${results.length - failed.length}/${results.length} kaydedildi. ${failed.length} proje kaydedilemedi (Sheet yoğun olabilir) — pencereyi tekrar açıp deneyebilirsin.`
+  urgentModalSave.textContent = "Kaydediliyor…";
+  try {
+    const { updatedIds, notFound } = await postBatchUpdate(
+      changed.map((p) => ({ id: p.id, patch: { urgent: checked.has(p.id) } }))
     );
-    renderUrgentModalList();
-  } else {
-    closeUrgentModal();
-    runSearch();
+    changed.forEach((p) => {
+      if (updatedIds.has(p.id)) p.urgent = checked.has(p.id);
+    });
+    recomputeUrgentInactiveSets();
+    refreshProjectMarkers();
+    if (notFound.length > 0) {
+      alert(`${updatedIds.size}/${changed.length} kaydedildi. ${notFound.length} proje bulunamadı.`);
+      renderUrgentModalList();
+    } else {
+      closeUrgentModal();
+      runSearch();
+    }
+  } catch (err) {
+    alert("Kaydedilemedi — internet bağlantısını kontrol edip tekrar dene.");
+  } finally {
+    urgentModalSave.disabled = false;
+    urgentModalSave.textContent = "Kaydet";
   }
 });
 
@@ -1563,28 +1579,36 @@ inactiveModalSave.addEventListener("click", async () => {
     closeInactiveModal();
     return;
   }
+  // Çok sayıda proje aynı anda değişiyorsa (ör. yanlışlıkla toplu işaret
+  // kaldırma) onay iste — bir yarış/kaza sonucu 30+ projenin durumunun
+  // yanlışlıkla değişmesini daha önce yaşadık.
+  if (changed.length > 5 && !confirm(`${changed.length} projenin aktiflik durumu değişecek. Emin misin?`)) {
+    return;
+  }
   inactiveModalSave.disabled = true;
-  const results = await postToSheetSequential(
-    changed.map((p) => ({ action: "update", id: p.id, patch: { active: activeIds.has(p.id) } })),
-    (done, total) => (inactiveModalSave.textContent = `Kaydediliyor… (${done}/${total})`)
-  );
-  results.forEach((r, i) => {
-    if (r.ok) changed[i].active = activeIds.has(changed[i].id);
-  });
-  recomputeUrgentInactiveSets();
-  refreshProjectMarkers();
-  rebuildProjectSelect();
-  inactiveModalSave.disabled = false;
-  inactiveModalSave.textContent = "Kaydet";
-  const failed = results.filter((r) => !r.ok);
-  if (failed.length > 0) {
-    alert(
-      `${results.length - failed.length}/${results.length} kaydedildi. ${failed.length} proje kaydedilemedi (Sheet yoğun olabilir) — pencereyi tekrar açıp deneyebilirsin.`
+  inactiveModalSave.textContent = "Kaydediliyor…";
+  try {
+    const { updatedIds, notFound } = await postBatchUpdate(
+      changed.map((p) => ({ id: p.id, patch: { active: activeIds.has(p.id) } }))
     );
-    renderInactiveModalList();
-  } else {
-    closeInactiveModal();
-    runSearch();
+    changed.forEach((p) => {
+      if (updatedIds.has(p.id)) p.active = activeIds.has(p.id);
+    });
+    recomputeUrgentInactiveSets();
+    refreshProjectMarkers();
+    rebuildProjectSelect();
+    if (notFound.length > 0) {
+      alert(`${updatedIds.size}/${changed.length} kaydedildi. ${notFound.length} proje bulunamadı.`);
+      renderInactiveModalList();
+    } else {
+      closeInactiveModal();
+      runSearch();
+    }
+  } catch (err) {
+    alert("Kaydedilemedi — internet bağlantısını kontrol edip tekrar dene.");
+  } finally {
+    inactiveModalSave.disabled = false;
+    inactiveModalSave.textContent = "Kaydet";
   }
 });
 
