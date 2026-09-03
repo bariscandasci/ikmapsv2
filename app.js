@@ -85,9 +85,11 @@ async function postBatchUpdate(patches) {
   return { updatedIds, notFound: [...notFound] };
 }
 
-// transitStops kendi lat/lng'sini taşımıyor (sadece id/name/mode) — bir
-// durağın yaklaşık konumunu, o durağı accessStopId olarak kullanan
-// ilçe/mahalle ve projelerin konumlarından türetiyoruz.
+// transitStops artık çoğu durak için (OSM tabanlı gerçek veri setinden
+// eşleştirilmiş) kendi lat/lng'sini taşıyor — bunlar öncelikli kullanılır.
+// Hâlâ koordinatsız kalan birkaç durak için (ör. stop_etlik, stop_pursaklar_est)
+// eskisi gibi, o durağı accessStopId olarak kullanan ilçe/mahalle ve
+// projelerin konumlarından yaklaşık bir konum türetiliyor.
 let stopApproxCoordsCache = null;
 function stopApproxCoords() {
   if (stopApproxCoordsCache) return stopApproxCoordsCache;
@@ -96,6 +98,9 @@ function stopApproxCoords() {
     if (!stopId || map[stopId]) return;
     map[stopId] = { lat, lng };
   };
+  ANKARA_DATA.transitStops.forEach((s) => {
+    if (s.lat != null && s.lng != null) add(s.id, s.lat, s.lng);
+  });
   ANKARA_DATA.districts.forEach((d) => {
     add(d.accessStopId, d.lat, d.lng);
     (d.neighborhoods || []).forEach((n) => add(n.accessStopId, n.lat, n.lng));
