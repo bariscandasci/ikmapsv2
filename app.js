@@ -588,6 +588,36 @@ function loadLocalTransitNetwork() {
 }
 loadLocalTransitNetwork(); // sayfa açılışında arka planda hemen başlat
 
+// Hat geometrileri (gerçek güzergah şekilleri) ayrı, biraz daha büyük bir
+// dosyada (transit_network_geometry.json, ~1.8MB, seyreltilmiş) tutuluyor ve
+// stops/lines'tan SONRA, arka planda yükleniyor — sayfa açılışını yavaşlatmasın
+// diye. Yüklendiğinde, o ana kadar çizilmiş olabilecek rotayı gerçek
+// güzergah şekliyle yeniden çizmek için mevcut aramayı tekrarlar.
+let localTransitGeometry = null;
+let localTransitGeometryPromise = null;
+function loadLocalTransitGeometry() {
+  if (localTransitGeometryPromise) return localTransitGeometryPromise;
+  localTransitGeometryPromise = fetch("transit_network_geometry.json")
+    .then((res) => res.json())
+    .then((data) => {
+      localTransitGeometry = data;
+      // Geometri yüklenmeden ÖNCE keşfedilip spliceDiscoveredLines ile
+      // eklenmiş olabilecek hatlara (o an geometrisiz kaldılar) geometriyi
+      // şimdi işle — runSearch() tek başına bunu yapmaz, çünkü aynı origin
+      // ikinci kez enrichOriginInBackground'dan geçmez (enrichedOriginIds).
+      Object.values(linesById).forEach((line) => {
+        if (!line.geometry && line.localLineId && data[line.localLineId]) {
+          line.geometry = data[line.localLineId];
+        }
+      });
+      if (typeof runSearch === "function") runSearch();
+      return data;
+    })
+    .catch(() => null);
+  return localTransitGeometryPromise;
+}
+loadLocalTransitNetwork().then(() => loadLocalTransitGeometry());
+
 /**
  * discoverNearbyTransit ile AYNI sözleşmeye sahip ({stops, lines, nearestStopName})
  * ama yerel veri setini kullanır — ağ isteği yok, anında sonuç. Bir hattın
@@ -620,7 +650,7 @@ async function discoverNearbyTransitLocal(lat, lng) {
           break;
         }
       }
-      lines.push({ ref: line.hatNo || "", name: line.name, mode: line.mode, hubStopId });
+      lines.push({ ref: line.hatNo || "", name: line.name, mode: line.mode, hubStopId, localLineId: line.id });
     });
   });
   lines.sort((a, b) => (a.hubStopId ? 0 : 1) - (b.hubStopId ? 0 : 1));
@@ -717,13 +747,21 @@ function spliceDiscoveredLines(stopId, discovery) {
     if (existingNames.has(label)) return;
 
     const lineId = `LIVE_${stopId}_${idx}`;
+    // localLineId varsa bu hat, yerel veri setinden (transit_network.json)
+    // geldi — geometrisi zaten yüklendiyse (transit_network_geometry.json)
+    // gerçek güzergah şekli haritada çizilebilir; henüz yüklenmediyse
+    // drawRoute eskisi gibi düz/kesikli çizgiye döner, geometri gelince
+    // (loadLocalTransitGeometry -> runSearch) otomatik yeniden çizilir.
+    const geometry = l.localLineId && localTransitGeometry ? localTransitGeometry[l.localLineId] : null;
     linesById[lineId] = {
       id: lineId,
       name: label,
       mode: l.mode,
       verified: true,
-      source: "OSM/Overpass canlı sorgu",
+      source: l.localLineId ? "OSM/Overpass, EGO Genel Müdürlüğü — 28.08.2026" : "OSM/Overpass canlı sorgu",
       stopIds: [stopId, l.hubStopId],
+      geometry: geometry || undefined,
+      localLineId: l.localLineId || undefined, // geometri sonradan yüklenirse doldurulabilsin diye saklanır
     };
     linesByStopId[stopId].push(lineId);
     (linesByStopId[l.hubStopId] = linesByStopId[l.hubStopId] || []).push(lineId);
