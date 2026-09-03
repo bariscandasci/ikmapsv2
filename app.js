@@ -554,6 +554,95 @@ function findKnownStopMatch(text) {
   return hit ? hit[1] : null;
 }
 
+// ---------------------------------------------------------------------------
+// Yerel toplu taşıma ağı (transit_network.json — OSM/Overpass, EGO Genel
+// Müdürlüğü, 28.08.2026): 350 hat (314 otobüs dahil) ve ~3.600 gerçek durak.
+// Adres/semt arama artık ÖNCELİKLE bu önceden hazırlanmış, internet
+// gerektirmeyen veri setini kullanıyor — canlı Overpass sorgusundan (tek
+// nokta etrafında 700m, çoğu otobüs hattını kaçırabiliyordu) çok daha
+// eksiksiz ve anında sonuç veriyor. discoverNearbyTransit() (Overpass) artık
+// sadece bu yerel dosya hiç yüklenemezse yedek olarak kullanılıyor.
+// ---------------------------------------------------------------------------
+let localTransitNetwork = null;
+let localTransitNetworkPromise = null;
+let linesByLocalStopId = null;
+let localStopsById = null;
+
+function loadLocalTransitNetwork() {
+  if (localTransitNetworkPromise) return localTransitNetworkPromise;
+  localTransitNetworkPromise = fetch("transit_network.json")
+    .then((res) => res.json())
+    .then((data) => {
+      localTransitNetwork = data;
+      localStopsById = Object.fromEntries(data.stops.map((s) => [s.id, s]));
+      linesByLocalStopId = {};
+      data.lines.forEach((line) => {
+        (line.stopIds || []).forEach((sid) => {
+          (linesByLocalStopId[sid] = linesByLocalStopId[sid] || []).push(line);
+        });
+      });
+      return data;
+    })
+    .catch(() => null);
+  return localTransitNetworkPromise;
+}
+loadLocalTransitNetwork(); // sayfa açılışında arka planda hemen başlat
+
+/**
+ * discoverNearbyTransit ile AYNI sözleşmeye sahip ({stops, lines, nearestStopName})
+ * ama yerel veri setini kullanır — ağ isteği yok, anında sonuç. Bir hattın
+ * "hubStopId"si artık sadece rota adının metnine bakılarak değil, hattın
+ * TÜM gerçek durak sırası (stopIds) taranıp bilinen 54 duraktan birine denk
+ * gelen gerçek bir durak var mı diye kontrol edilerek bulunuyor — bu yüzden
+ * ismi bilinen bir hub'ı anmayan ama gerçekte oradan geçen hatlar da artık
+ * doğru şekilde bağlanabiliyor.
+ */
+async function discoverNearbyTransitLocal(lat, lng) {
+  const net = await loadLocalTransitNetwork();
+  if (!net) return null;
+
+  const nearby = net.stops
+    .map((s) => ({ s, distanceM: Math.round(haversineKm({ lat, lng }, { lat: s.lat, lng: s.lng }) * 1000) }))
+    .filter((x) => x.distanceM <= 700)
+    .sort((a, b) => a.distanceM - b.distanceM);
+
+  const seenLineIds = new Set();
+  const lines = [];
+  nearby.forEach(({ s }) => {
+    (linesByLocalStopId[s.id] || []).forEach((line) => {
+      if (seenLineIds.has(line.id)) return;
+      seenLineIds.add(line.id);
+      let hubStopId = null;
+      for (const sid of line.stopIds || []) {
+        const stop = localStopsById[sid];
+        if (stop && stop.knownStopId) {
+          hubStopId = stop.knownStopId;
+          break;
+        }
+      }
+      lines.push({ ref: line.hatNo || "", name: line.name, mode: line.mode, hubStopId });
+    });
+  });
+  lines.sort((a, b) => (a.hubStopId ? 0 : 1) - (b.hubStopId ? 0 : 1));
+
+  return {
+    stops: nearby.slice(0, 8).map(({ s, distanceM }) => ({ name: s.name, distanceM })),
+    lines,
+    nearestStopName: nearby[0] ? nearby[0].s.name : null,
+  };
+}
+
+/** Önce yerel veri setini dener, hiç yüklenemediyse (ör. dosya erişilemedi) canlı Overpass'e düşer. */
+async function discoverNearbyTransitBest(lat, lng) {
+  const local = await discoverNearbyTransitLocal(lat, lng);
+  if (local) return local;
+  try {
+    return await discoverNearbyTransit(lat, lng);
+  } catch {
+    return { stops: [], lines: [], nearestStopName: null };
+  }
+}
+
 /**
  * Bir koordinatın ~700m çevresindeki gerçek toplu taşıma duraklarını ve
  * oradan geçen hat (route) ilişkilerini Overpass API'den canlı çeker.
@@ -1052,7 +1141,7 @@ async function handleAddressSearch() {
     addressStatus.textContent = "Yakındaki gerçek duraklar/hatlar taranıyor…";
     runSearch();
 
-    const discovery = await discoverNearbyTransit(geo.lat, geo.lng);
+    const discovery = await discoverNearbyTransitBest(geo.lat, geo.lng);
     const addedCount = spliceDiscoveredLines(origin.stopId, discovery);
     enrichedOriginIds.add(origin.id);
     currentDiscoveryByOriginId[origin.id] = discovery;
@@ -1092,7 +1181,7 @@ async function enrichOriginInBackground(origin) {
   if (origin.kind === "custom" || enrichedOriginIds.has(origin.id)) return;
   enrichedOriginIds.add(origin.id);
   try {
-    const discovery = await discoverNearbyTransit(origin.coords.lat, origin.coords.lng);
+    const discovery = await discoverNearbyTransitBest(origin.coords.lat, origin.coords.lng);
     currentDiscoveryByOriginId[origin.id] = discovery;
     const addedCount = spliceDiscoveredLines(origin.stopId, discovery);
     if (addedCount > 0) {
