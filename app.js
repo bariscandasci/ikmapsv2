@@ -16,6 +16,19 @@
 const SHEET_API_URL = "https://script.google.com/macros/s/AKfycbxprctzoQPNbHz1kA3g4qQciSZ9hqIGtN_BC_q0YzSEvOmUGYxW9PKWTTpA7z6SoPw/exec";
 const SHEET_CACHE_KEY = "ik_ulasim_sheet_cache_v1";
 
+// Sheet'e başarılı bir yazmadan hemen sonra yerel önbelleği de günceller.
+// Bunu atlarsak, kullanıcı bir projeyi aç/kapat edip kaydettikten sonra
+// sayfayı yenilediğinde, sayfa açılışında ÖNCE eski önbellek anında
+// gösterildiği için (canlı Sheet verisi arka planda gelene kadar) değişiklik
+// "sıfırlanmış" gibi görünüyordu.
+function saveProjectsCache() {
+  try {
+    localStorage.setItem(SHEET_CACHE_KEY, JSON.stringify(ANKARA_DATA.projects));
+  } catch {
+    /* localStorage kullanılamıyorsa sessizce yoksay */
+  }
+}
+
 // data.js'teki statik projelerde henüz urgent/active alanı yok — bunları
 // eski (ANKARA_DATA.urgentProjectIds / referral==="Aktif değil") mantığından
 // türeterek her projeye ekliyoruz; Sheet'ten canlı veri geldiğinde bu
@@ -1459,8 +1472,16 @@ const urgentModalClose = document.getElementById("urgentModalClose");
 const urgentModalCancel = document.getElementById("urgentModalCancel");
 const urgentModalSave = document.getElementById("urgentModalSave");
 
+// Modal açıldığı andaki urgent durumunun anlık görüntüsü. Kaydet'e basılınca
+// checkbox'lar bu görüntüyle kıyaslanır — canlı ANKARA_DATA.projects ile DEĞİL,
+// çünkü modal açıkken arka planda gelen bir Sheet yenilemesi projects dizisini
+// değiştirebilir; o an canlı veriyle kıyaslamak, kullanıcının hiç dokunmadığı
+// projeleri de "değişti" sayıp yanlışlıkla geri yazmaya (veri bozulmasına) yol açıyordu.
+let urgentModalBaseline = new Map();
+
 function renderUrgentModalList() {
   const sorted = activeProjects().sort((a, b) => a.name.localeCompare(b.name, "tr"));
+  urgentModalBaseline = new Map(sorted.map((p) => [p.id, Boolean(p.urgent)]));
   urgentModalList.innerHTML = sorted
     .map(
       (p) => `
@@ -1491,7 +1512,7 @@ urgentModalSave.addEventListener("click", async () => {
   const checked = new Set(
     Array.from(urgentModalList.querySelectorAll("input[type=checkbox]:checked")).map((cb) => cb.value)
   );
-  const changed = activeProjects().filter((p) => Boolean(p.urgent) !== checked.has(p.id));
+  const changed = activeProjects().filter((p) => (urgentModalBaseline.get(p.id) ?? Boolean(p.urgent)) !== checked.has(p.id));
   if (changed.length === 0) {
     closeUrgentModal();
     return;
@@ -1513,6 +1534,7 @@ urgentModalSave.addEventListener("click", async () => {
     });
     recomputeUrgentInactiveSets();
     refreshProjectMarkers();
+    saveProjectsCache();
     if (notFound.length > 0) {
       alert(`${updatedIds.size}/${changed.length} kaydedildi. ${notFound.length} proje bulunamadı.`);
       renderUrgentModalList();
@@ -1541,8 +1563,12 @@ const inactiveModalSave = document.getElementById("inactiveModalSave");
 
 // Burada — acil pencerenin aksine — TÜM projeler (kapalı olanlar dahil)
 // listelenir, aksi halde kapatılmış bir projeyi geri açmanın yolu olmazdı.
+// Aynı anlık-görüntü mantığı burada da geçerli — bkz. urgentModalBaseline.
+let inactiveModalBaseline = new Map();
+
 function renderInactiveModalList() {
   const sorted = [...ANKARA_DATA.projects].sort((a, b) => a.name.localeCompare(b.name, "tr"));
+  inactiveModalBaseline = new Map(sorted.map((p) => [p.id, Boolean(p.active)]));
   inactiveModalList.innerHTML = sorted
     .map(
       (p) => `
@@ -1574,7 +1600,7 @@ inactiveModalSave.addEventListener("click", async () => {
   const activeIds = new Set(
     Array.from(inactiveModalList.querySelectorAll("input[type=checkbox]:checked")).map((cb) => cb.value)
   );
-  const changed = ANKARA_DATA.projects.filter((p) => Boolean(p.active) !== activeIds.has(p.id));
+  const changed = ANKARA_DATA.projects.filter((p) => (inactiveModalBaseline.get(p.id) ?? Boolean(p.active)) !== activeIds.has(p.id));
   if (changed.length === 0) {
     closeInactiveModal();
     return;
@@ -1597,6 +1623,7 @@ inactiveModalSave.addEventListener("click", async () => {
     recomputeUrgentInactiveSets();
     refreshProjectMarkers();
     rebuildProjectSelect();
+    saveProjectsCache();
     if (notFound.length > 0) {
       alert(`${updatedIds.size}/${changed.length} kaydedildi. ${notFound.length} proje bulunamadı.`);
       renderInactiveModalList();
@@ -1651,11 +1678,7 @@ async function loadLiveProjects() {
     const data = await res.json();
     if (data.ok && Array.isArray(data.projects) && data.projects.length) {
       applyLiveProjects(data.projects);
-      try {
-        localStorage.setItem(SHEET_CACHE_KEY, JSON.stringify(data.projects));
-      } catch {
-        /* localStorage kullanılamıyorsa sessizce yoksay */
-      }
+      saveProjectsCache();
     }
   } catch {
     // Sheet'e ulaşılamadı (internet yok, henüz kurulmadı vb.) — statik/önbellek veriyle sessizce devam
@@ -1732,6 +1755,7 @@ addProjectForm.addEventListener("submit", async (e) => {
     recomputeUrgentInactiveSets();
     buildProjectMarker(project);
     rebuildProjectSelect();
+    saveProjectsCache();
     closeAddProjectModal();
     if (currentMode === "origin-to-project" && originSelect.value) runSearch();
   } catch (err) {
