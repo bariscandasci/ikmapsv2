@@ -570,7 +570,7 @@ let localStopsById = null;
 
 function loadLocalTransitNetwork() {
   if (localTransitNetworkPromise) return localTransitNetworkPromise;
-  localTransitNetworkPromise = fetch("transit_network.json")
+  localTransitNetworkPromise = fetch("transit_network.json?v=2")
     .then((res) => res.json())
     .then((data) => {
       localTransitNetwork = data;
@@ -597,7 +597,7 @@ let localTransitGeometry = null;
 let localTransitGeometryPromise = null;
 function loadLocalTransitGeometry() {
   if (localTransitGeometryPromise) return localTransitGeometryPromise;
-  localTransitGeometryPromise = fetch("transit_network_geometry.json")
+  localTransitGeometryPromise = fetch("transit_network_geometry.json?v=2")
     .then((res) => res.json())
     .then((data) => {
       localTransitGeometry = data;
