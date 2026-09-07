@@ -62207,9 +62207,7 @@
       "id": "ego_41305",
       "name": "ÜÇ YILDIZ PAZAR YERİ",
       "address": "-",
-      "lat": 39.9207759,
-      "lng": 32.8540497,
-      "coordSource": "nominatim_geocode_adres"
+      "coordSource": "ekstrapolasyon"
     },
     {
       "id": "ego_41306",
@@ -62848,97 +62846,73 @@
       "id": "ego_41421",
       "name": "TAMER PETROL",
       "address": "-",
-      "lat": 39.9207759,
-      "lng": 32.8540497,
-      "coordSource": "nominatim_geocode_adres"
+      "coordSource": "ekstrapolasyon"
     },
     {
       "id": "ego_41422",
       "name": "HACIKÖY GİRİŞ",
       "address": "-",
-      "lat": 39.9207759,
-      "lng": 32.8540497,
-      "coordSource": "nominatim_geocode_adres"
+      "coordSource": "ekstrapolasyon"
     },
     {
       "id": "ego_41423",
       "name": "DAĞDEMİR KÖYÜ GİRİŞ",
       "address": "-",
-      "lat": 39.9207759,
-      "lng": 32.8540497,
-      "coordSource": "nominatim_geocode_adres"
+      "coordSource": "ekstrapolasyon"
     },
     {
       "id": "ego_41424",
       "name": "ULAŞ KARDEŞLER PETROL",
       "address": "-",
-      "lat": 39.9207759,
-      "lng": 32.8540497,
-      "coordSource": "nominatim_geocode_adres"
+      "coordSource": "ekstrapolasyon"
     },
     {
       "id": "ego_41425",
       "name": "ÇANDIR İÖO",
       "address": "-",
-      "lat": 39.9207759,
-      "lng": 32.8540497,
-      "coordSource": "nominatim_geocode_adres"
+      "coordSource": "ekstrapolasyon"
     },
     {
       "id": "ego_41426",
       "name": "ÇAYKAYA KÖYÜ GİRİŞİ",
       "address": "-",
-      "lat": 39.9207759,
-      "lng": 32.8540497,
-      "coordSource": "nominatim_geocode_adres"
+      "coordSource": "ekstrapolasyon"
     },
     {
       "id": "ego_41428",
       "name": "ULAŞ KARDEŞLER PETROL",
       "address": "-",
-      "lat": 39.9207759,
-      "lng": 32.8540497,
-      "coordSource": "nominatim_geocode_adres"
+      "coordSource": "ekstrapolasyon"
     },
     {
       "id": "ego_41429",
       "name": "DAĞDEMİR KÖYÜ GİRİŞ",
       "address": "-",
-      "lat": 39.9207759,
-      "lng": 32.8540497,
-      "coordSource": "nominatim_geocode_adres"
+      "coordSource": "ekstrapolasyon"
     },
     {
       "id": "ego_41430",
       "name": "HACIKÖY GİRİŞ",
       "address": "-",
-      "lat": 39.9207759,
-      "lng": 32.8540497,
-      "coordSource": "nominatim_geocode_adres"
+      "coordSource": "ekstrapolasyon"
     },
     {
       "id": "ego_41431",
       "name": "TAMER PETROL",
       "address": "-",
-      "lat": 39.9207759,
-      "lng": 32.8540497,
-      "coordSource": "nominatim_geocode_adres"
+      "coordSource": "ekstrapolasyon"
     },
     {
       "id": "ego_41432",
       "name": "ALİBEYLİ KÖYÜ GİRİŞ",
       "address": "-",
-      "lat": 39.9207759,
-      "lng": 32.8540497,
-      "coordSource": "nominatim_geocode_adres"
+      "coordSource": "ekstrapolasyon"
     },
     {
       "id": "ego_41433",
       "name": "GÜMÜŞPINAR KÖYÜ GİRİŞ",
       "address": "-",
-      "lat": 39.9207759,
-      "lng": 32.8540497,
-      "coordSource": "nominatim_geocode_adres"
+      "coordSource": "ekstrapolasyon"
     },
     {
       "id": "ego_41434",
@@ -64436,17 +64410,13 @@
       "id": "ego_41654",
       "name": "ALİBEYLİ KÖYÜ GİRİŞ",
       "address": "-",
-      "lat": 39.9207759,
-      "lng": 32.8540497,
-      "coordSource": "nominatim_geocode_adres"
+      "coordSource": "ekstrapolasyon"
     },
     {
       "id": "ego_41655",
       "name": "GÜMÜŞPINAR KÖYÜ GİRİŞ",
       "address": "-",
-      "lat": 39.9207759,
-      "lng": 32.8540497,
-      "coordSource": "nominatim_geocode_adres"
+      "coordSource": "ekstrapolasyon"
     },
     {
       "id": "ego_41656",
@@ -64628,9 +64598,7 @@
       "id": "ego_41679",
       "name": "BARAJ MESİRE ALANI",
       "address": "-",
-      "lat": 39.9207759,
-      "lng": 32.8540497,
-      "coordSource": "nominatim_geocode_adres"
+      "coordSource": "ekstrapolasyon"
     },
     {
       "id": "ego_41680",
@@ -77467,9 +77435,7 @@
       "id": "ego_51477",
       "name": "SOĞUKSU MİLLİ PARKI GİRİŞİ",
       "address": "-",
-      "lat": 39.9207759,
-      "lng": 32.8540497,
-      "coordSource": "nominatim_geocode_adres"
+      "coordSource": "ekstrapolasyon"
     },
     {
       "id": "ego_51478",
@@ -77732,9 +77698,7 @@
       "id": "ego_51513",
       "name": "OLTAN KÖY GİRİŞİ",
       "address": "-",
-      "lat": 39.9207759,
-      "lng": 32.8540497,
-      "coordSource": "nominatim_geocode_adres"
+      "coordSource": "ekstrapolasyon"
     },
     {
       "id": "ego_51516",
@@ -77902,9 +77866,7 @@
       "id": "ego_51563",
       "name": "ÇİMŞİT PARK",
       "address": "-",
-      "lat": 39.9207759,
-      "lng": 32.8540497,
-      "coordSource": "nominatim_geocode_adres"
+      "coordSource": "ekstrapolasyon"
     },
     {
       "id": "ego_51564",
@@ -78448,9 +78410,7 @@
       "id": "ego_52125",
       "name": "TANSEL GÖKMEN",
       "address": "-",
-      "lat": 39.9207759,
-      "lng": 32.8540497,
-      "coordSource": "nominatim_geocode_adres"
+      "coordSource": "ekstrapolasyon"
     },
     {
       "id": "ego_52150",
@@ -78739,9 +78699,7 @@
       "id": "ego_52931",
       "name": "OLTAN KÖY MEYDANI",
       "address": "-",
-      "lat": 39.9207759,
-      "lng": 32.8540497,
-      "coordSource": "nominatim_geocode_adres"
+      "coordSource": "ekstrapolasyon"
     },
     {
       "id": "ego_52950",
@@ -78755,9 +78713,7 @@
       "id": "ego_52968",
       "name": "OLTAN KÖY CAMİ",
       "address": "-",
-      "lat": 39.9207759,
-      "lng": 32.8540497,
-      "coordSource": "nominatim_geocode_adres"
+      "coordSource": "ekstrapolasyon"
     },
     {
       "id": "ego_53000",
@@ -78843,9 +78799,7 @@
       "id": "ego_53011",
       "name": "ANKARA NAKLİYECİLER SİTESİ",
       "address": "-",
-      "lat": 39.9207759,
-      "lng": 32.8540497,
-      "coordSource": "nominatim_geocode_adres"
+      "coordSource": "ekstrapolasyon"
     },
     {
       "id": "ego_53015",
@@ -78883,9 +78837,7 @@
       "id": "ego_53023",
       "name": "MEHMET EMİN YURDAKUL CD.",
       "address": "-",
-      "lat": 39.9207759,
-      "lng": 32.8540497,
-      "coordSource": "nominatim_geocode_adres"
+      "coordSource": "ekstrapolasyon"
     },
     {
       "id": "ego_53024",
@@ -79853,17 +79805,13 @@
       "id": "ego_53157",
       "name": "GOP METRO İSTASYONU",
       "address": "-",
-      "lat": 39.9207759,
-      "lng": 32.8540497,
-      "coordSource": "nominatim_geocode_adres"
+      "coordSource": "ekstrapolasyon"
     },
     {
       "id": "ego_53158",
       "name": "GOP METRO İSTASYONU",
       "address": "-",
-      "lat": 39.9207759,
-      "lng": 32.8540497,
-      "coordSource": "nominatim_geocode_adres"
+      "coordSource": "ekstrapolasyon"
     },
     {
       "id": "ego_53159",
@@ -81848,49 +81796,37 @@
       "id": "ego_56805",
       "name": "DEMPA SANAYİ SİTESİ 1.DURAK",
       "address": "-",
-      "lat": 39.9207759,
-      "lng": 32.8540497,
-      "coordSource": "nominatim_geocode_adres"
+      "coordSource": "ekstrapolasyon"
     },
     {
       "id": "ego_56806",
       "name": "DEMPA SANAYİ SİTESİ 2.DURAK",
       "address": "-",
-      "lat": 39.9207759,
-      "lng": 32.8540497,
-      "coordSource": "nominatim_geocode_adres"
+      "coordSource": "ekstrapolasyon"
     },
     {
       "id": "ego_56807",
       "name": "DEMPA SANAYİ SİTESİ 3.DURAK",
       "address": "-",
-      "lat": 39.9207759,
-      "lng": 32.8540497,
-      "coordSource": "nominatim_geocode_adres"
+      "coordSource": "ekstrapolasyon"
     },
     {
       "id": "ego_56808",
       "name": "DEMPA SANAYİ SİTESİ 4.DURAK",
       "address": "-",
-      "lat": 39.9207759,
-      "lng": 32.8540497,
-      "coordSource": "nominatim_geocode_adres"
+      "coordSource": "ekstrapolasyon"
     },
     {
       "id": "ego_56809",
       "name": "DEMPA SANAYİ SİTESİ 5.DURAK",
       "address": "-",
-      "lat": 39.9207759,
-      "lng": 32.8540497,
-      "coordSource": "nominatim_geocode_adres"
+      "coordSource": "ekstrapolasyon"
     },
     {
       "id": "ego_56810",
       "name": "DEMPA SANAYİ SİTESİ NİZAMİYE",
       "address": "-",
-      "lat": 39.9207759,
-      "lng": 32.8540497,
-      "coordSource": "nominatim_geocode_adres"
+      "coordSource": "ekstrapolasyon"
     },
     {
       "id": "ego_56811",

@@ -165,222 +165,424 @@ function roundTo5(n) {
   return Math.round(n / 5) * 5;
 }
 
-// M1, hem Batıkent'i hem Kızılay'ı aynı sefer içinde geçiyor; M4 de hem
-// Ankara Gar'ı hem Kızılay'ı. Bu yüzden Batıkent ve Ankara Gar, "aracı
-// değiştirmeden" değil ama "tek bir ek aktarmayla" Kızılay'a bağlanır.
-const HUB_BRIDGE = {
-  stop_batikent: { toHub: "stop_kizilay", viaLineId: "M1" },
-  stop_gar: { toHub: "stop_kizilay", viaLineId: "M4" },
-};
-const HUB_PREFERENCE = ["stop_kizilay", "stop_batikent", "stop_gar"];
+// ---------------------------------------------------------------------------
+// 2) GERÇEK GRAF TABANLI ROTA MOTORU
+// ---------------------------------------------------------------------------
+//
+// transit_network.json'daki 668 gerçek EGO hattı / 10.940 gerçek durak
+// üzerinde kurulan bir graf + çok-kaynaklı Dijkstra ile çalışır. Bir hat
+// (ör. birleşmiş M1-M2-M3) tek bir gerçek hat_id taşıdığı için, aynı hat
+// üzerindeki iki durak arasında ARTIK asla sahte bir "aktarma" üretilmiyor
+// — eskiden data.js'teki elle seçilmiş ~10 hat/3 hub'lık özet ağ ve isim
+// eşleştirmesine dayanan resolveTransfer() böyle bir hata üretebiliyordu.
+// Grafın kendisi loadLocalTransitNetwork() tamamlanınca (aşağıda, §3b)
+// kurulur; bu bölüm sadece kurulum ve sorgu fonksiyonlarını tanımlar.
 
-function hubsOf(lineIds) {
-  const hubs = new Set();
-  lineIds.forEach((lid) => {
-    linesById[lid].stopIds.forEach((s) => {
-      if (HUBS.has(s)) hubs.add(s);
-    });
-  });
-  return hubs;
+// Otobüs hızı 20→16 km/s: 20, gerçek şehir içi trafik/ışık/duraklama dikkate
+// alınınca fazla iyimserdi — uzun otobüs zincirlerini metroya karşı yapay
+// şekilde rekabetçi gösteriyordu (bkz. Etlik→Bilkent Center örneği: gerçek
+// hattı tam kullanan metro rotası bulunabiliyordu ama toplamda tüm-otobüs
+// alternatifiyle neredeyse berabere kalıyordu). Metro/Ankaray hızı, raylı
+// sistemin trafikten bağımsız olmasını yansıtacak şekilde hafif yükseltildi.
+const MODE_SPEED_KMH = { otobus: 16, metro: 33, ankaray: 33, tren: 45 };
+const WALK_SPEED_KMH = 4.5;
+const STOP_DWELL_MIN = 0.4;
+// 7→5 dk: iki aktarmalı bir rotada (ör. otobüs→metro→otobüs) eski değer
+// tek başına ~14 dk'lık bir ceza demekti — bu, metronun hız avantajını
+// gereksiz yere eziyordu. 5 dk hâlâ anlamlı bir bekleme/yürüme cezası.
+const TRANSFER_PENALTY_MIN = 5;
+const WALK_TRANSFER_MAX_KM = 0.35; // farklı hatların yakın duraklarını "aktarma" olarak bağlayan yürüme kenarları
+const NEAREST_STOP_SEARCH_KM = 1.2; // bir nokta çevresinde graf'a giriş/çıkış için aranan yarıçap
+const NEAREST_STOP_MAX_CANDIDATES = 6;
+const WALK_STEP_MIN_KM = 0.12; // bundan kısa yürümeler ayrı adım olarak gösterilmez (süreye yine de dahil)
+const GRID_CELL_DEG = 0.006; // ~500-650m'lik ızgara hücresi (Ankara enleminde)
+
+function walkMinutes(km) {
+  return (km / WALK_SPEED_KMH) * 60;
 }
 
-function lineTouching(lineIds, stopId) {
-  return lineIds.find((lid) => linesById[lid].stopIds.includes(stopId)) || lineIds[0];
+function gridCellKey(lat, lng) {
+  return `${Math.floor(lat / GRID_CELL_DEG)}:${Math.floor(lng / GRID_CELL_DEG)}`;
 }
 
-/**
- * İki durak arasındaki hat/aktarma zincirini belirler (gerçek hat verisine
- * göre). transfers: 0 (aynı hat), 1 (ortak hub'dan tek aktarma), 2+ (Kızılay
- * süper-hub'ı üzerinden köprüleme).
- */
-function resolveTransfer(originStopId, destStopId) {
-  if (originStopId === destStopId) {
-    return { transfers: 0, legs: [] };
+/** Basit ikili min-heap — Dijkstra'nın öncelik kuyruğu için (10k+ düğümde O(n) pop performans sorunu yaratırdı). */
+class MinHeap {
+  constructor() {
+    this.items = [];
   }
-  const originLines = linesByStopId[originStopId] || [];
-  const destLines = linesByStopId[destStopId] || [];
-
-  const sharedLine = originLines.find((l) => destLines.includes(l));
-  if (sharedLine) {
-    return { transfers: 0, legs: [{ lineId: sharedLine, from: originStopId, to: destStopId }] };
+  push(item) {
+    const a = this.items;
+    a.push(item);
+    let i = a.length - 1;
+    while (i > 0) {
+      const p = (i - 1) >> 1;
+      if (a[p].minutes <= a[i].minutes) break;
+      [a[p], a[i]] = [a[i], a[p]];
+      i = p;
+    }
   }
-
-  const originHubs = hubsOf(originLines);
-  const destHubs = hubsOf(destLines);
-  const commonHub = HUB_PREFERENCE.find((h) => originHubs.has(h) && destHubs.has(h));
-
-  if (commonHub) {
-    return {
-      transfers: 1,
-      legs: [
-        { lineId: lineTouching(originLines, commonHub), from: originStopId, to: commonHub },
-        { lineId: lineTouching(destLines, commonHub), from: commonHub, to: destStopId },
-      ],
-    };
-  }
-
-  // 3 ana hub'ın dışında da olsa, iki hattın gerçekte kesiştiği HERHANGİ bir
-  // durak varsa (ör. M3 ile Başkentray'ın Eryaman'da kesişmesi gibi) bunu da
-  // geçerli bir aktarma noktası say — yoksa algoritma yalnızca Kızılay/
-  // Batıkent/Ankara Gar'ı bildiği için gereksiz yere şehir merkezine gidip
-  // gelen, gerçekçi olmayan uzun rotalar öneriyordu.
-  for (const oLid of originLines) {
-    const oStopSet = new Set(linesById[oLid].stopIds);
-    for (const dLid of destLines) {
-      const shared = linesById[dLid].stopIds.find((s) => oStopSet.has(s));
-      if (shared) {
-        return {
-          transfers: 1,
-          legs: [
-            { lineId: oLid, from: originStopId, to: shared },
-            { lineId: dLid, from: shared, to: destStopId },
-          ],
-        };
+  pop() {
+    const a = this.items;
+    const top = a[0];
+    const last = a.pop();
+    if (a.length) {
+      a[0] = last;
+      let i = 0;
+      const n = a.length;
+      for (;;) {
+        let smallest = i;
+        const l = 2 * i + 1;
+        const r = 2 * i + 2;
+        if (l < n && a[l].minutes < a[smallest].minutes) smallest = l;
+        if (r < n && a[r].minutes < a[smallest].minutes) smallest = r;
+        if (smallest === i) break;
+        [a[i], a[smallest]] = [a[smallest], a[i]];
+        i = smallest;
       }
     }
+    return top;
   }
-
-  // Bilinen ağa hiç bağlanamayan bir uç (ör. yakınında keşfedilen hattı bilinen
-  // hiçbir aktarma merkezine ulaşamayan, canlı aranmış özel bir adres). Kaba,
-  // açıkça TAHMİNİ işaretlenecek tek bacaklı bir bağlantı varsayıyoruz.
-  if (originHubs.size === 0 || destHubs.size === 0) {
-    return { transfers: 1, legs: [{ lineId: null, from: originStopId, to: destStopId }] };
+  get isEmpty() {
+    return this.items.length === 0;
   }
+}
 
-  // Ortak hub yok: her iki uç da Kızılay süper-hub'ına (gerekirse Batıkent ya
-  // da Ankara Gar üzerinden bir ek aktarmayla) köprülenir.
-  const originHub = [...originHubs][0];
-  const destHub = [...destHubs][0];
-  const legs = [{ lineId: lineTouching(originLines, originHub), from: originStopId, to: originHub }];
-  let cursor = originHub;
+let transitGraph = null; // buildTransitGraph() tamamlanınca dolar
 
-  if (cursor !== "stop_kizilay" && HUB_BRIDGE[cursor]) {
-    legs.push({ lineId: HUB_BRIDGE[cursor].viaLineId, from: cursor, to: HUB_BRIDGE[cursor].toHub });
-    cursor = HUB_BRIDGE[cursor].toHub;
-  }
-  if (cursor !== destHub && HUB_BRIDGE[destHub] && HUB_BRIDGE[destHub].toHub === cursor) {
-    legs.push({ lineId: HUB_BRIDGE[destHub].viaLineId, from: cursor, to: destHub });
-    cursor = destHub;
-  }
-  legs.push({ lineId: lineTouching(destLines, destHub), from: cursor, to: destStopId });
-
-  const merged = mergeLegs(legs);
-  return { transfers: Math.max(merged.length - 1, 0), legs: merged };
+/**
+ * "tren" modundaki hatların çoğu (25'ten 22'si) YHT/ekspres gibi şehirlerarası
+ * servisler (Ankara-İstanbul, Ankara-Konya YHT'si vb.) — bunlar bilet/
+ * rezervasyon gerektirir, seyrek sefer yapar ve şehir içi durak vermez; bir
+ * adayın günlük işe gidiş-gelişi için gerçekçi değildir. Gerçek şehir
+ * içi/banliyö hattı olan Başkentray (B1) ve Ankara-Polatlı Bölgesel Treni
+ * (B21) kısa, gerçek bir hat numarası taşırken, şehirlerarası olanlar OSM
+ * ilişki id'sini placeholder olarak taşıyor (hatNo: "LINE 12345") — bu farkla
+ * ayırt ediyoruz.
+ */
+function isRoutableLine(line) {
+  if (line.mode !== "tren") return true;
+  return /^B\d+$/.test(line.hatNo || "");
 }
 
 /**
- * Art arda gelen, aynı hatta binilen bacakları tek bacakta birleştirir ve
- * sıfır mesafeli (from === to, ör. hedef zaten hub durağının kendisiyse
- * oluşan) bacakları atar. Köprüleme mantığı bazen "M1'e bin, sonra yine
- * M1'e bin" gibi yapay bir aktarma üretebiliyordu — bu, gerçekte tek bir
- * kesintisiz yolculuğu gereksiz yere ek aktarma gibi gösteren bir hataydı.
+ * transit_network.json'dan (network: {stops, lines}) bir graf kurar:
+ * - Biniş kenarları: her hattın ardışık durakları arası, iki yönde de,
+ *   gerçek mesafe/mod hızına göre süreli.
+ * - Yürüme/aktarma kenarları: ızgara komşuluğuyla (O(n²) tarama YOK)
+ *   ≤350m'deki FARKLI duraklar arası.
  */
-function mergeLegs(rawLegs) {
-  const merged = [];
-  for (const leg of rawLegs) {
-    if (leg.from === leg.to) continue;
-    const last = merged[merged.length - 1];
-    if (last && last.lineId === leg.lineId) {
-      last.to = leg.to;
-    } else {
-      merged.push({ ...leg });
+function buildTransitGraph(network) {
+  const stopsById = new Map();
+  const grid = new Map();
+  network.stops.forEach((s) => {
+    if (typeof s.lat !== "number" || typeof s.lng !== "number") return;
+    stopsById.set(s.id, s);
+    const key = gridCellKey(s.lat, s.lng);
+    if (!grid.has(key)) grid.set(key, []);
+    grid.get(key).push(s.id);
+  });
+
+  const adjacency = new Map();
+  const addEdge = (fromId, toId, minutes, lineId, mode) => {
+    if (!adjacency.has(fromId)) adjacency.set(fromId, []);
+    adjacency.get(fromId).push({ to: toId, minutes, lineId, mode });
+  };
+
+  const linesByLocalId = new Map();
+  network.lines.forEach((line) => {
+    if (!isRoutableLine(line)) return;
+    linesByLocalId.set(line.id, line);
+    const speed = MODE_SPEED_KMH[line.mode] || MODE_SPEED_KMH.otobus;
+    const ids = line.stopIds || [];
+    for (let i = 0; i < ids.length - 1; i++) {
+      const a = stopsById.get(ids[i]);
+      const b = stopsById.get(ids[i + 1]);
+      if (!a || !b) continue;
+      const km = haversineKm({ lat: a.lat, lng: a.lng }, { lat: b.lat, lng: b.lng });
+      const minutes = (km / speed) * 60 + STOP_DWELL_MIN;
+      addEdge(a.id, b.id, minutes, line.id, line.mode);
+      addEdge(b.id, a.id, minutes, line.id, line.mode);
+    }
+  });
+
+  const offsets = [-1, 0, 1];
+  network.stops.forEach((s) => {
+    if (typeof s.lat !== "number") return;
+    const cellLat = Math.floor(s.lat / GRID_CELL_DEG);
+    const cellLng = Math.floor(s.lng / GRID_CELL_DEG);
+    offsets.forEach((dLat) => {
+      offsets.forEach((dLng) => {
+        const bucket = grid.get(`${cellLat + dLat}:${cellLng + dLng}`);
+        if (!bucket) return;
+        bucket.forEach((otherId) => {
+          if (otherId === s.id) return;
+          const other = stopsById.get(otherId);
+          const km = haversineKm({ lat: s.lat, lng: s.lng }, { lat: other.lat, lng: other.lng });
+          if (km <= WALK_TRANSFER_MAX_KM) {
+            addEdge(s.id, otherId, walkMinutes(km), null, "yurume");
+          }
+        });
+      });
+    });
+  });
+
+  return { stopsById, grid, adjacency, linesByLocalId };
+}
+
+/** Bir {lat,lng} noktasının radiusKm çevresindeki gerçek durakları (uzaklığa göre sıralı) döner. */
+function stopsWithinRadius(graph, lat, lng, radiusKm) {
+  const cellSpan = Math.ceil(radiusKm / 0.5) + 1;
+  const cellLat = Math.floor(lat / GRID_CELL_DEG);
+  const cellLng = Math.floor(lng / GRID_CELL_DEG);
+  const results = [];
+  for (let dLat = -cellSpan; dLat <= cellSpan; dLat++) {
+    for (let dLng = -cellSpan; dLng <= cellSpan; dLng++) {
+      const bucket = graph.grid.get(`${cellLat + dLat}:${cellLng + dLng}`);
+      if (!bucket) continue;
+      bucket.forEach((id) => {
+        const s = graph.stopsById.get(id);
+        const km = haversineKm({ lat, lng }, { lat: s.lat, lng: s.lng });
+        if (km <= radiusKm) results.push({ stop: s, km });
+      });
     }
   }
-  return merged;
+  results.sort((a, b) => a.km - b.km);
+  return results;
+}
+
+/**
+ * Çok kaynaklı Dijkstra. ÖNEMLİ: durum sadece durak değil, "hangi hatta
+ * bulunuluyor" bilgisini de taşır (stopId + lineId birlikte bir durum
+ * oluşturur) — sadece durağa göre tek bir en-iyi-süre tutmak, gerçek bir
+ * hatta binmişken ARA istasyonlardan birine başka (daha ucuz ama farklı)
+ * bir hatla da ulaşılabiliyorsa, o ara istasyonun "daha ucuz" kaydını
+ * kilitleyip asıl hattın devamını keşfetmeyi engelliyordu. Somut örnek:
+ * Kızılay'dan Bilkent'e TEK hatla giden metro, yol üstündeki Necatibey/
+ * Millî Kütüphane gibi istasyonlara yerel bir otobüsle biraz daha "ucuza"
+ * ulaşılabildiği için hiç keşfedilmiyordu — oysa metroyla devam etmek
+ * (o ara istasyonlara o an nasıl ulaşıldığından bağımsız olarak) toplamda
+ * daha hızlıydı. Bu yüzden aynı durağa aynı hatla ulaşan her farklı "durum"
+ * ayrı ayrı takip ediliyor; bir durağa gerçekten en hızlı ulaşım ise tüm
+ * hat-durumları arasındaki minimum olarak (bestAtStop) ayrıca tutuluyor.
+ */
+function runDijkstra(graph, sources) {
+  const NONE = " "; // henüz hiçbir hatta binilmemiş/sadece yürünüyor durumu
+  const dist = new Map(); // "stopId|lineKey" -> dakika
+  const prev = new Map(); // "stopId|lineKey" -> { fromKey, lineId, mode }
+  const keyStopId = new Map(); // "stopId|lineKey" -> stopId
+  const bestAtStop = new Map(); // stopId -> tüm hat-durumları arasında en iyi dakika
+  const bestStateAtStop = new Map(); // stopId -> o en iyiye ulaşan durum anahtarı
+  const heap = new MinHeap();
+
+  function relaxBestAtStop(stopId, key, minutes) {
+    const cur = bestAtStop.get(stopId);
+    if (cur === undefined || minutes < cur - 1e-9) {
+      bestAtStop.set(stopId, minutes);
+      bestStateAtStop.set(stopId, key);
+    }
+  }
+
+  sources.forEach(({ stopId, startMinutes }) => {
+    const key = stopId + "|" + NONE;
+    if (!dist.has(key) || dist.get(key) > startMinutes) {
+      dist.set(key, startMinutes);
+      keyStopId.set(key, stopId);
+      heap.push({ stopId, lineKey: NONE, minutes: startMinutes });
+      relaxBestAtStop(stopId, key, startMinutes);
+    }
+  });
+
+  while (!heap.isEmpty) {
+    const cur = heap.pop();
+    const curKey = cur.stopId + "|" + cur.lineKey;
+    if (cur.minutes > dist.get(curKey) + 1e-6) continue; // eski/geçersiz kayıt
+    const curLine = cur.lineKey === NONE ? null : cur.lineKey;
+    const edges = graph.adjacency.get(cur.stopId) || [];
+    edges.forEach((e) => {
+      // Yürüme kenarları durumu HER ZAMAN nötrler (NONE) — hangi hatla
+      // gelindiği bilgisini taşımaya devam etseydi, yoğun aktarma
+      // bölgelerinde (Kızılay gibi onlarca hattın kesiştiği duraklar)
+      // yürüme zincirleri üzerinden durum sayısı katlanarak patlıyordu
+      // (bir seçim ~19 saniye sürüyordu). Aktarma cezası bu yüzden BİR KEZ,
+      // araçtan inip yürümeye başlarken uygulanıyor; nötr durumdan sonraki
+      // ilk biniş artık cezasız (zaten cezalandırıldı, iki kere sayılmıyor).
+      let transferCost = 0;
+      let newLineKey;
+      if (e.lineId) {
+        if (curLine && curLine !== e.lineId) transferCost = TRANSFER_PENALTY_MIN;
+        newLineKey = e.lineId;
+      } else {
+        if (curLine) transferCost = TRANSFER_PENALTY_MIN;
+        newLineKey = NONE;
+      }
+      const newMinutes = cur.minutes + e.minutes + transferCost;
+      const newKey = e.to + "|" + newLineKey;
+      const known = dist.get(newKey);
+      if (known === undefined || newMinutes < known - 1e-9) {
+        dist.set(newKey, newMinutes);
+        keyStopId.set(newKey, e.to);
+        prev.set(newKey, { fromKey: curKey, lineId: e.lineId, mode: e.mode });
+        heap.push({ stopId: e.to, lineKey: newLineKey, minutes: newMinutes });
+        relaxBestAtStop(e.to, newKey, newMinutes);
+      }
+    });
+  }
+  return { prev, keyStopId, bestAtStop, bestStateAtStop };
+}
+
+// rankProjectsForOrigin/rankDistrictsForProject tek bir tarafı sabit tutup
+// diğerini döngüyle değiştiriyor; hangi taraf sabitse Dijkstra'yı SADECE
+// ondan bir kez çalıştırıp sonucu burada önbelleğe alıyoruz (aksi halde her
+// proje/ilçe çifti için ayrı bir tam graf taraması gerekirdi).
+let dijkstraCache = { key: null, result: null };
+
+function getDijkstraFrom(coords) {
+  const key = coords.lat.toFixed(4) + "," + coords.lng.toFixed(4);
+  if (dijkstraCache.key === key) return dijkstraCache.result;
+  const sources = stopsWithinRadius(transitGraph, coords.lat, coords.lng, NEAREST_STOP_SEARCH_KM)
+    .slice(0, NEAREST_STOP_MAX_CANDIDATES)
+    .map(({ stop, km }) => ({ stopId: stop.id, startMinutes: walkMinutes(km) }));
+  const result = runDijkstra(transitGraph, sources);
+  dijkstraCache = { key, result };
+  return result;
+}
+
+/**
+ * originCoords/destCoords: {lat, lng}. Dönüş: { totalMinutes, pathStopIds, edgeAtStop }
+ * ya da her iki nokta arasında (1.2km içinde hiç durak yoksa) null.
+ */
+function findRealRoute(originCoords, destCoords) {
+  if (!transitGraph) return null;
+  const { prev, keyStopId, bestAtStop, bestStateAtStop } = getDijkstraFrom(originCoords);
+  const destCandidates = stopsWithinRadius(transitGraph, destCoords.lat, destCoords.lng, NEAREST_STOP_SEARCH_KM).slice(
+    0,
+    NEAREST_STOP_MAX_CANDIDATES
+  );
+
+  let best = null;
+  destCandidates.forEach(({ stop, km }) => {
+    const d = bestAtStop.get(stop.id);
+    if (d === undefined) return;
+    const total = d + walkMinutes(km);
+    if (!best || total < best.total) best = { total, stopId: stop.id };
+  });
+  if (!best) return null;
+
+  const pathStopIds = [];
+  const edgeAtStop = new Map(); // varış durağı stopId -> o durağa gelirken kullanılan {lineId, mode}
+  let curKey = bestStateAtStop.get(best.stopId);
+  while (curKey) {
+    const stopId = keyStopId.get(curKey);
+    pathStopIds.unshift(stopId);
+    const p = prev.get(curKey);
+    if (p) edgeAtStop.set(stopId, { lineId: p.lineId, mode: p.mode });
+    curKey = p ? p.fromKey : null;
+  }
+  return { totalMinutes: best.total, pathStopIds, edgeAtStop };
+}
+
+/** Bir durak dizisini (ve prev'deki hat bilgisini), ardışık aynı hattı tek adımda birleştirerek adımlara çevirir. */
+function pathToSteps(pathStopIds, edgeAtStop, graph) {
+  const rawEdges = [];
+  for (let i = 1; i < pathStopIds.length; i++) {
+    const info = edgeAtStop.get(pathStopIds[i]);
+    rawEdges.push({ from: pathStopIds[i - 1], to: pathStopIds[i], lineId: info.lineId, mode: info.mode });
+  }
+
+  // Aynı fiziksel noktaya çok yakın ama farklı isimli/yönlü iki durak arası
+  // (ör. bir caddenin gidiş/dönüş durakları) sıfıra yakın bir yürüme kenarı
+  // oluşturabilir. Bunu BİRLEŞTİRMEDEN ÖNCE elemek gerekiyor — aksi halde
+  // aynı hattın iki bacağı arasına sıkışan böyle bir kenar, birleşmeyi
+  // engelleyip aynı hattı yapay şekilde iki ayrı adım gibi gösterebiliyor.
+  const meaningfulEdges = rawEdges.filter((e) => {
+    if (e.lineId) return true;
+    const a = graph.stopsById.get(e.from);
+    const b = graph.stopsById.get(e.to);
+    return haversineKm({ lat: a.lat, lng: a.lng }, { lat: b.lat, lng: b.lng }) > WALK_STEP_MIN_KM;
+  });
+
+  const merged = [];
+  meaningfulEdges.forEach((e) => {
+    const last = merged[merged.length - 1];
+    if (last && last._lineId === e.lineId) {
+      last.toStopId = e.to;
+    } else {
+      merged.push({ _lineId: e.lineId, mode: e.mode, fromStopId: e.from, toStopId: e.to });
+    }
+  });
+
+  return merged.map((s) => {
+    const fromName = graph.stopsById.get(s.fromStopId).name;
+    const toName = graph.stopsById.get(s.toStopId).name;
+    if (s._lineId) {
+      const line = graph.linesByLocalId.get(s._lineId);
+      return {
+        mode: line ? line.mode : s.mode,
+        line: line ? formatLineLabel(line.hatNo, line.name) : "Hat",
+        from: fromName,
+        to: toName,
+        verified: line ? line.verified !== false : true,
+        lineId: s._lineId,
+      };
+    }
+    return { mode: "hub", line: "Yürüyüş", from: fromName, to: toName, verified: true, lineId: null };
+  });
 }
 
 /**
  * originCoords/destCoords: {lat, lng}
- * originStopId/destStopId: en yakın kabul edilen durak id'leri
- * Dönüş: { durationMin, transfers, routeSummary, steps, verified }
+ * Dönüş: { durationMin, transfers, routeSummary, steps, distanceKm, verified }
  */
-// Aynı sembolik durağa atanmış iki nokta gerçekte bu kadar uzaksa (km),
-// "aynı durak / yürüme mesafesi" demek yanıltıcı olur — bunun yerine o
-// durağa hizmet eden gerçek hattı önerip gerçek mesafeye göre süre hesaplarız.
-const SAME_STOP_WALK_LIMIT_KM = 0.8;
-
 function estimateTransit(origin, dest) {
   const distanceKm = haversineKm(origin.coords, dest.coords);
+  const destLabel = dest.name || stopName(dest.stopId);
+  const originLabel = origin.name || stopName(origin.stopId);
 
-  if (origin.stopId === dest.stopId && distanceKm > SAME_STOP_WALK_LIMIT_KM) {
-    const lineIds = linesByStopId[origin.stopId] || [];
-    const line = linesById[lineIds.find((id) => linesById[id].verified !== false)] || linesById[lineIds[0]];
-    const hasBusLeg = line ? line.mode === "otobus" : true;
-    const speedKmh = hasBusLeg ? 22 : 28;
-    const durationMin = Math.max(roundTo5((distanceKm / speedKmh) * 60 + 8), 12);
-    const steps = [{
-      mode: line ? line.mode : "otobus",
-      line: line ? line.name : "Yerel hat (doğrulanamadı)",
-      from: stopName(origin.stopId),
-      to: dest.name || stopName(dest.stopId),
-      verified: line ? line.verified !== false : false,
-      lineId: line ? line.id : null,
-      approx: true,
-    }];
+  if (!transitGraph) {
+    // Graf henüz kurulmadı (transit_network.json hâlâ indiriliyor) — kaba bir
+    // geçici tahmin döneriz; graf hazır olur olmaz runSearch() otomatik
+    // tekrar çağrılıp sonuç sessizce gerçek rotayla güncellenir.
+    const durationMin = Math.max(roundTo5((distanceKm / 18) * 60 + 10), 12);
     return {
       durationMin, transfers: 0,
-      routeSummary: `${steps[0].line} (${dest.name || stopName(dest.stopId)} civarı)`,
-      steps, distanceKm, verified: steps[0].verified,
+      routeSummary: "Hesaplanıyor…",
+      steps: [{ mode: "hub", line: "Hesaplanıyor…", from: originLabel, to: destLabel, verified: false, lineId: null }],
+      distanceKm, verified: false,
     };
   }
 
-  const { transfers, legs } = resolveTransfer(origin.stopId, dest.stopId);
-
-  const hasBusLeg = legs.some((l) => linesById[l.lineId] && linesById[l.lineId].mode === "otobus");
-  const speedKmh = Math.max((hasBusLeg ? 22 : 30) - transfers * 2, 14);
-  const walkOverheadMin = 6 + (hasBusLeg ? 4 : 0);
-  const transferPenaltyMin = transfers * 9;
-
-  let durationMin = roundTo5(
-    (distanceKm / speedKmh) * 60 + walkOverheadMin + transferPenaltyMin
-  );
-  durationMin = Math.max(durationMin, 12);
-
-  const steps =
-    legs.length === 0
-      ? [{ mode: "hub", line: "Aynı durak / yürüme mesafesi", from: stopName(origin.stopId), to: stopName(dest.stopId), verified: true, lineId: null }]
-      : legs.map((leg) => {
-          const line = linesById[leg.lineId];
-          return {
-            mode: line ? line.mode : "otobus",
-            line: line ? line.name : "Hat",
-            from: stopName(leg.from),
-            to: stopName(leg.to),
-            verified: line ? line.verified !== false : false,
-            lineId: leg.lineId || null,
-          };
-        });
-
-  // Projenin gerçek konumu, rotanın bittiği sembolik durağın (accessStopId)
-  // kendisinden belirgin biçimde uzaksa (ör. Çankaya'daki bir proje sırf en
-  // yakın bilinen hub olduğu için "stop_kizilay"a atanmış olabilir, ama
-  // gerçekte oradan birkaç km uzakta olabilir), bu farkı sessizce toplam
-  // süreye gömüp "Kızılay'da inince proje oradaymış" gibi yanıltıcı bir rota
-  // göstermek yerine, ayrı ve TAHMİNİ işaretli bir son adım olarak belirtiriz.
-  const destStop = stopsById[dest.stopId];
-  const destStopDistanceKm =
-    destStop && typeof destStop.lat === "number"
-      ? haversineKm({ lat: destStop.lat, lng: destStop.lng }, dest.coords)
-      : 0;
-
-  let finalStopName = steps[steps.length - 1].to;
-  let verified = steps.every((s) => s.verified);
-  if (destStopDistanceKm > SAME_STOP_WALK_LIMIT_KM) {
-    steps.push({
-      mode: "otobus",
-      line: "Yerel hat (doğrulanamadı)",
-      from: finalStopName,
-      to: dest.name || stopName(dest.stopId),
-      verified: false,
-      lineId: null,
-      approx: true,
-    });
-    finalStopName = dest.name || stopName(dest.stopId);
-    verified = false;
+  const route = findRealRoute(origin.coords, dest.coords);
+  if (!route) {
+    // Güvenlik ağı: bir uç, gerçek ağın 1.2km çevresinde hiç durağa denk
+    // gelmiyorsa (ör. Ankara dışı bir adres) düz tahmine düşülür.
+    const durationMin = Math.max(roundTo5((distanceKm / 18) * 60 + 10), 12);
+    return {
+      durationMin, transfers: 0,
+      routeSummary: `Yerel hat (doğrulanamadı) (${destLabel} civarı)`,
+      steps: [{ mode: "otobus", line: "Yerel hat (doğrulanamadı)", from: originLabel, to: destLabel, verified: false, lineId: null, approx: true }],
+      distanceKm, verified: false,
+    };
   }
 
-  const vehicleLineNames = steps.map((s) => s.line);
-  const routeSummary = `${vehicleLineNames.join(" + ")} (${finalStopName} durağı)`;
+  const steps = pathToSteps(route.pathStopIds, route.edgeAtStop, transitGraph);
+
+  const firstStop = transitGraph.stopsById.get(route.pathStopIds[0]);
+  const lastStop = transitGraph.stopsById.get(route.pathStopIds[route.pathStopIds.length - 1]);
+  const firstWalkKm = haversineKm(origin.coords, { lat: firstStop.lat, lng: firstStop.lng });
+  const lastWalkKm = haversineKm({ lat: lastStop.lat, lng: lastStop.lng }, dest.coords);
+
+  if (lastWalkKm > WALK_STEP_MIN_KM) {
+    steps.push({ mode: "hub", line: "Yürüyüş", from: lastStop.name, to: destLabel, verified: true, lineId: null });
+  }
+  if (firstWalkKm > WALK_STEP_MIN_KM) {
+    steps.unshift({ mode: "hub", line: "Yürüyüş", from: originLabel, to: firstStop.name, verified: true, lineId: null });
+  }
+
+  const rideSteps = steps.filter((s) => s.lineId);
+  const transfers = Math.max(rideSteps.length - 1, 0);
+  const durationMin = Math.max(roundTo5(route.totalMinutes), 5);
+  const routeSummary = `${rideSteps.length ? rideSteps.map((s) => s.line).join(" + ") : "Yürüyüş"} (${destLabel} civarı)`;
+  const verified = steps.every((s) => s.verified);
 
   return { durationMin, transfers, routeSummary, steps, distanceKm, verified };
 }
@@ -390,7 +592,7 @@ function estimateTransit(origin, dest) {
 // ---------------------------------------------------------------------------
 
 const TransitCache = {
-  KEY: "ik_ulasim_cache_v11", // v11: proje, atandığı durağa uzaksa (>0.8km) ayrı bir "son adım" (TAHMİNİ) gösteriliyor
+  KEY: "ik_ulasim_cache_v16", // v16: yürüme kenarlarının durum patlamasına yol açan hat-bağlamı taşıma hatası düzeltildi (performans)
   _mem: null,
   _load() {
     if (this._mem) return this._mem;
@@ -596,7 +798,7 @@ let localStopsById = null;
 
 function loadLocalTransitNetwork() {
   if (localTransitNetworkPromise) return localTransitNetworkPromise;
-  localTransitNetworkPromise = fetch("transit_network.json?v=2")
+  localTransitNetworkPromise = fetch("transit_network.json?v=3")
     .then((res) => res.json())
     .then((data) => {
       localTransitNetwork = data;
@@ -607,6 +809,12 @@ function loadLocalTransitNetwork() {
           (linesByLocalStopId[sid] = linesByLocalStopId[sid] || []).push(line);
         });
       });
+      // Gerçek graf tabanlı rota motorunu (bkz. §2) bu veriyle kur. Kurulana
+      // kadar estimateTransit() kaba bir geçici tahmin döner; kurulur kurulmaz
+      // (henüz bir arama gösteriliyorsa) sonuçlar sessizce gerçek rotayla
+      // güncellensin diye mevcut arama tekrar çalıştırılır.
+      transitGraph = buildTransitGraph(data);
+      if (typeof runSearch === "function") runSearch();
       return data;
     })
     .catch(() => null);
@@ -758,9 +966,10 @@ out tags;`;
 
 /**
  * Bir discovery sonucundaki hub'a bağlanabilen hatları, verilen stopId'ye
- * canlı hat olarak ekler (linesById/linesByStopId'ye yeni satırlar ekleyerek
- * mevcut resolveTransfer motorunu hiç değiştirmeden kullanır). Zaten eklenmiş
- * hatları tekrar eklemez.
+ * canlı hat olarak ekler (linesById/linesByStopId'ye yeni satırlar ekler —
+ * bunlar artık rota hesaplamasını değil, yalnızca "bu bölgeden geçen gerçek
+ * hatlar" bilgi panelini besliyor; rota artık transitGraph üzerinden
+ * hesaplanıyor, bkz. §2). Zaten eklenmiş hatları tekrar eklemez.
  */
 function spliceDiscoveredLines(stopId, discovery) {
   linesByStopId[stopId] = linesByStopId[stopId] || [];
@@ -1532,9 +1741,17 @@ function drawRoute(originCoords, row, bucket, destCoordsOverride) {
   if (steps.length === 0) return;
 
   const lineOfStep = (s) => (s.lineId ? linesById[s.lineId] : null);
+  // Gerçek graf motorunun ürettiği adımlardaki lineId'ler linesById'de değil
+  // (transit_network.json'ın kendi id'leri, ör. "ego_line_101") — bu yüzden
+  // geometri için ayrıca transitGraph + localTransitGeometry'e de bakılır.
   const geometryOfStep = (s) => {
     const line = lineOfStep(s);
-    return line && line.geometry && line.geometry.length > 1 ? line.geometry : null;
+    if (line && line.geometry && line.geometry.length > 1) return line.geometry;
+    if (s.lineId && transitGraph && transitGraph.linesByLocalId.has(s.lineId) && localTransitGeometry) {
+      const geo = localTransitGeometry[s.lineId];
+      if (geo && geo.length > 1) return geo;
+    }
+    return null;
   };
 
   // Her bacağın başlangıç/bitiş "çapa" koordinatını belirle: ardışık iki
