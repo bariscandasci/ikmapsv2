@@ -351,10 +351,36 @@ function estimateTransit(origin, dest) {
           };
         });
 
+  // Projenin gerçek konumu, rotanın bittiği sembolik durağın (accessStopId)
+  // kendisinden belirgin biçimde uzaksa (ör. Çankaya'daki bir proje sırf en
+  // yakın bilinen hub olduğu için "stop_kizilay"a atanmış olabilir, ama
+  // gerçekte oradan birkaç km uzakta olabilir), bu farkı sessizce toplam
+  // süreye gömüp "Kızılay'da inince proje oradaymış" gibi yanıltıcı bir rota
+  // göstermek yerine, ayrı ve TAHMİNİ işaretli bir son adım olarak belirtiriz.
+  const destStop = stopsById[dest.stopId];
+  const destStopDistanceKm =
+    destStop && typeof destStop.lat === "number"
+      ? haversineKm({ lat: destStop.lat, lng: destStop.lng }, dest.coords)
+      : 0;
+
+  let finalStopName = steps[steps.length - 1].to;
+  let verified = steps.every((s) => s.verified);
+  if (destStopDistanceKm > SAME_STOP_WALK_LIMIT_KM) {
+    steps.push({
+      mode: "otobus",
+      line: "Yerel hat (doğrulanamadı)",
+      from: finalStopName,
+      to: dest.name || stopName(dest.stopId),
+      verified: false,
+      lineId: null,
+      approx: true,
+    });
+    finalStopName = dest.name || stopName(dest.stopId);
+    verified = false;
+  }
+
   const vehicleLineNames = steps.map((s) => s.line);
-  const finalStopName = steps[steps.length - 1].to;
   const routeSummary = `${vehicleLineNames.join(" + ")} (${finalStopName} durağı)`;
-  const verified = steps.every((s) => s.verified);
 
   return { durationMin, transfers, routeSummary, steps, distanceKm, verified };
 }
@@ -364,7 +390,7 @@ function estimateTransit(origin, dest) {
 // ---------------------------------------------------------------------------
 
 const TransitCache = {
-  KEY: "ik_ulasim_cache_v10", // v10: "Proje → Aday Havuzu" modunda da proje konumu için canlı otobüs/metro keşfi çalışıyor
+  KEY: "ik_ulasim_cache_v11", // v11: proje, atandığı durağa uzaksa (>0.8km) ayrı bir "son adım" (TAHMİNİ) gösteriliyor
   _mem: null,
   _load() {
     if (this._mem) return this._mem;
