@@ -465,19 +465,33 @@ function getDijkstraFrom(coords, graph = transitGraph) {
 
 /**
  * originCoords/destCoords: {lat, lng}. graph verilmezse resmi graf kullanılır.
+ * fixedSide: bir dizi çağrı boyunca hangi ucun SABİT kaldığını belirtir
+ * ("origin" varsayılan). Dijkstra HER ZAMAN fixedSide tarafından koşturulur
+ * (getDijkstraFrom tek girişlik önbelleğinden faydalansın diye) — origin
+ * sabitken (ör. rankProjectsForOrigin: aynı aday için onlarca proje
+ * taranıyor) bu zaten varsayılan davranıştı. fixedSide="dest" ise (ör.
+ * rankDistrictsForProject: aynı proje için onlarca ilçe taranıyor) Dijkstra
+ * dest'ten koşturulup yol sonradan origin->dest sırasına çevrilir — kenarın
+ * hat/modu yöne bağlı olmadığı için (bkz. buildTransitGraph, her kenar iki
+ * yönde de eklenir) bu çevirme sonucu ETKİLEMEZ, sadece SIRAYI düzeltir.
+ * Bu olmadan, sabit taraf dest iken her satırda origin değiştiği için
+ * Dijkstra önbelleği hiç isabet etmiyor ve her sorgu tam bir graf taraması
+ * gerektiriyordu (9 ilçe için ~5 saniye — gözlemlenen "çok yavaş" şikayeti).
  * Dönüş: { totalMinutes, pathStopIds, edgeAtStop } ya da her iki nokta
  * arasında (1.2km içinde hiç durak yoksa) null.
  */
-function findRealRoute(originCoords, destCoords, graph = transitGraph) {
+function findRealRoute(originCoords, destCoords, graph = transitGraph, fixedSide = "origin") {
   if (!graph) return null;
-  const { prev, keyStopId, bestAtStop, bestStateAtStop } = getDijkstraFrom(originCoords, graph);
-  const destCandidates = stopsWithinRadius(graph, destCoords.lat, destCoords.lng, NEAREST_STOP_SEARCH_KM).slice(
+  const fromCoords = fixedSide === "dest" ? destCoords : originCoords;
+  const toCoords = fixedSide === "dest" ? originCoords : destCoords;
+  const { prev, keyStopId, bestAtStop, bestStateAtStop } = getDijkstraFrom(fromCoords, graph);
+  const toCandidates = stopsWithinRadius(graph, toCoords.lat, toCoords.lng, NEAREST_STOP_SEARCH_KM).slice(
     0,
     NEAREST_STOP_MAX_CANDIDATES
   );
 
   let best = null;
-  destCandidates.forEach(({ stop, km }) => {
+  toCandidates.forEach(({ stop, km }) => {
     const d = bestAtStop.get(stop.id);
     if (d === undefined) return;
     const total = d + walkMinutes(km);
@@ -495,7 +509,19 @@ function findRealRoute(originCoords, destCoords, graph = transitGraph) {
     if (p) edgeAtStop.set(stopId, { lineId: p.lineId, mode: p.mode });
     curKey = p ? p.fromKey : null;
   }
-  return { totalMinutes: best.total, pathStopIds, edgeAtStop };
+
+  if (fixedSide !== "dest") {
+    return { totalMinutes: best.total, pathStopIds, edgeAtStop };
+  }
+
+  // Dijkstra dest'ten koşturuldu; pathStopIds şu an dest->origin sırasında.
+  // Çağıranın beklediği origin->dest sırasına çeviriyoruz.
+  const reversedIds = [...pathStopIds].reverse();
+  const reversedEdgeAtStop = new Map();
+  for (let i = 0; i < pathStopIds.length - 1; i++) {
+    reversedEdgeAtStop.set(pathStopIds[i], edgeAtStop.get(pathStopIds[i + 1]));
+  }
+  return { totalMinutes: best.total, pathStopIds: reversedIds, edgeAtStop: reversedEdgeAtStop };
 }
 
 /** Bir durak dizisini (ve prev'deki hat bilgisini), ardışık aynı hattı tek adımda birleştirerek adımlara çevirir. */
@@ -548,9 +574,12 @@ function pathToSteps(pathStopIds, edgeAtStop, graph) {
 
 /**
  * originCoords/destCoords: {lat, lng}
+ * fixedSide: bir dizi çağrı boyunca hangi ucun sabit kaldığını belirtir —
+ * Dijkstra önbelleğinin isabet etmesi için findRealRoute'a olduğu gibi
+ * iletilir (bkz. findRealRoute'un başındaki not).
  * Dönüş: { durationMin, transfers, routeSummary, steps, distanceKm, verified }
  */
-function estimateTransit(origin, dest) {
+function estimateTransit(origin, dest, fixedSide = "origin") {
   const distanceKm = haversineKm(origin.coords, dest.coords);
   const destLabel = dest.name || stopName(dest.stopId);
   const originLabel = origin.name || stopName(origin.stopId);
@@ -568,7 +597,7 @@ function estimateTransit(origin, dest) {
     };
   }
 
-  const route = findRealRoute(origin.coords, dest.coords);
+  const route = findRealRoute(origin.coords, dest.coords, transitGraph, fixedSide);
   if (!route) {
     // Güvenlik ağı: bir uç, gerçek ağın 1.2km çevresinde hiç durağa denk
     // gelmiyorsa (ör. Ankara dışı bir adres) düz tahmine düşülür.
@@ -601,7 +630,7 @@ function estimateTransit(origin, dest) {
   const routeSummary = `${rideSteps.length ? rideSteps.map((s) => s.line).join(" + ") : "Yürüyüş"} (${destLabel} civarı)`;
   const verified = steps.every((s) => s.verified);
 
-  const dolmusAlternative = buildDolmusAlternative(origin, dest, originLabel, destLabel, route.totalMinutes);
+  const dolmusAlternative = buildDolmusAlternative(origin, dest, originLabel, destLabel, route.totalMinutes, fixedSide);
 
   return { durationMin, transfers, routeSummary, steps, distanceKm, verified, dolmusAlternative };
 }
@@ -615,10 +644,10 @@ function estimateTransit(origin, dest) {
 // (rota kısmında dolmuşu ayrı bir yerde göstermek) birebir örtüşüyor.
 const DOLMUS_ALT_MIN_SAVING_MIN = 5;
 
-function buildDolmusAlternative(origin, dest, originLabel, destLabel, officialMinutes) {
+function buildDolmusAlternative(origin, dest, originLabel, destLabel, officialMinutes, fixedSide = "origin") {
   if (!transitGraphWithDolmus) return null;
 
-  const altRoute = findRealRoute(origin.coords, dest.coords, transitGraphWithDolmus);
+  const altRoute = findRealRoute(origin.coords, dest.coords, transitGraphWithDolmus, fixedSide);
   if (!altRoute) return null;
   if (officialMinutes - altRoute.totalMinutes < DOLMUS_ALT_MIN_SAVING_MIN) return null;
 
@@ -656,7 +685,7 @@ function buildDolmusAlternative(origin, dest, originLabel, destLabel, officialMi
 // ---------------------------------------------------------------------------
 
 const TransitCache = {
-  KEY: "ik_ulasim_cache_v20", // v20: GOP Metro İstasyonu/Çimşit Park gibi 5 koordinatsız durak aynı isimli ikiziyle eşleştirildi
+  KEY: "ik_ulasim_cache_v21", // v21: Proje->Aday Havuzu yönünde Dijkstra artık proje tarafından koşuyor (önbellek isabeti, hız düzeltmesi)
   _mem: null,
   _load() {
     if (this._mem) return this._mem;
@@ -697,12 +726,12 @@ const TransitCache = {
  * değiştirilir. Cache anahtarı (originId_destId) aynı kalır; böylece aynı
  * ilçe-proje çifti tekrar sorgulandığında API'ye tekrar gidilmez.
  */
-function getTransitEstimate(originId, origin, destId, dest) {
+function getTransitEstimate(originId, origin, destId, dest, fixedSide = "origin") {
   const cacheKey = `${originId}__${destId}`;
   const cached = TransitCache.get(cacheKey);
   if (cached) return cached;
 
-  const result = estimateTransit(origin, dest);
+  const result = estimateTransit(origin, dest, fixedSide);
   TransitCache.set(cacheKey, result);
   return result;
 }
@@ -1196,7 +1225,11 @@ function rankDistrictsForProject(projectId, thresholdMin = null) {
 
   const rows = ANKARA_DATA.districts.map((d) => {
     const origin = originById(d.id);
-    const estimate = getTransitEstimate(d.id, origin, projectId, dest);
+    // fixedSide="dest": proje bu döngü boyunca sabit, ilçe her satırda
+    // değişiyor — Dijkstra'nın proje tarafından koşup önbelleğe isabet
+    // etmesi için (aksi halde her ilçe için sıfırdan tam graf taraması
+    // gerekirdi, bkz. findRealRoute'un başındaki not).
+    const estimate = getTransitEstimate(d.id, origin, projectId, dest, "dest");
     return { district: d, dest, ...estimate };
   });
 
@@ -1638,6 +1671,13 @@ function renderOriginToProject(originId) {
 
   const origin = originById(originId);
   resultsHeading.textContent = `${origin.name} → En Uygun Projeler (${rows.length})`;
+  // Önce genel bir görünüme geç — aşağıdaki forEach içinde idx===0 için
+  // çağrılan drawRoute() kendi fitBounds()'unu bunun ÜZERİNE uygulayıp asıl
+  // (en üstteki) rotayı sıkı şekilde kadrajlayacak. Bu çağrı SONRADAN
+  // yapılırsa (eskiden öyleydi), drawRoute'un fitBounds'unu geçersiz kılıp
+  // çizilen rota çizgisini geniş/genel görünüm içinde fark edilmez kadar
+  // küçük bırakıyordu.
+  map.setView([origin.coords.lat, origin.coords.lng], 11, { animate: true, duration: 0.8 });
 
   enrichOriginInBackground(origin);
   renderNearbyLinesPanel(originId);
@@ -1677,7 +1717,6 @@ function renderOriginToProject(originId) {
   if (rows.length === 0) {
     routeDetail.classList.add("hidden");
   }
-  map.setView([origin.coords.lat, origin.coords.lng], 11, { animate: true, duration: 0.8 });
 }
 
 function renderProjectToOrigin(projectId) {
@@ -1688,6 +1727,10 @@ function renderProjectToOrigin(projectId) {
 
   const project = projectById(projectId);
   resultsHeading.textContent = `${project.name} → En Uygun İlçeler (${rows.length})`;
+  // bkz. renderOriginToProject'teki not — bu, drawRoute'un fitBounds'undan
+  // ÖNCE gelmeli, aksi halde en üstteki (idx===0) rota haritada görünmez
+  // kadar küçük kalıyor (kullanıcının bildirdiği "hatları göstermiyor" sorunu).
+  map.setView([project.coords.lat, project.coords.lng], 11, { animate: true, duration: 0.8 });
 
   enrichOriginInBackground(project);
   renderNearbyLinesPanel(projectId);
@@ -1726,7 +1769,6 @@ function renderProjectToOrigin(projectId) {
   if (rows.length === 0) {
     routeDetail.classList.add("hidden");
   }
-  map.setView([project.coords.lat, project.coords.lng], 11, { animate: true, duration: 0.8 });
 }
 
 function buildResultCard({ title, subtitle, durationMin, transfers, bucket, onClick, highlight, terms, urgent, referral }) {
