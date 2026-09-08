@@ -199,8 +199,15 @@ function avgWaitMin(mode) {
   return (MODE_HEADWAY_MIN[mode] !== undefined ? MODE_HEADWAY_MIN[mode] : MODE_HEADWAY_MIN.otobus) / 2;
 }
 const WALK_TRANSFER_MAX_KM = 0.35; // farklı hatların yakın duraklarını "aktarma" olarak bağlayan yürüme kenarları
-const NEAREST_STOP_SEARCH_KM = 1.2; // bir nokta çevresinde graf'a giriş/çıkış için aranan yarıçap
-const NEAREST_STOP_MAX_CANDIDATES = 6;
+// 1.2km/6 aday, Gölbaşı/Mogan Gölü gibi seyrek bölgelerde gerçek en iyi
+// hattı kaçırıyordu: Google Maps'in önerdiği daha hızlı hatların bindiği
+// durak (MOGAN PARKI) merkeze 1.44km'de — 1.2km sınırının hemen dışında
+// kalıp hiç aday olarak değerlendirilmiyordu, oysa Google (sınırsız yürüme
+// arama mesafesiyle) o durağa 24 dk'lık gerçek bir yürüyüş öneriyordu.
+// 1.8km/10 adaya çıkarınca aynı örnekte süre 109 dk'dan 85 dk'ya düşüp
+// Google'ın en iyi seçeneğiyle (84 dk) örtüştü — bkz. proje notları.
+const NEAREST_STOP_SEARCH_KM = 1.8; // bir nokta çevresinde graf'a giriş/çıkış için aranan yarıçap
+const NEAREST_STOP_MAX_CANDIDATES = 10;
 const WALK_STEP_MIN_KM = 0.12; // bundan kısa yürümeler ayrı adım olarak gösterilmez (süreye yine de dahil)
 const GRID_CELL_DEG = 0.006; // ~500-650m'lik ızgara hücresi (Ankara enleminde)
 
@@ -685,7 +692,7 @@ function buildDolmusAlternative(origin, dest, originLabel, destLabel, officialMi
 // ---------------------------------------------------------------------------
 
 const TransitCache = {
-  KEY: "ik_ulasim_cache_v21", // v21: Proje->Aday Havuzu yönünde Dijkstra artık proje tarafından koşuyor (önbellek isabeti, hız düzeltmesi)
+  KEY: "ik_ulasim_cache_v22", // v22: en yakın durak arama yarıçapı 1.2km/6->1.8km/10 (seyrek bölgelerde gerçek en hızlı hat artık gözden kaçmıyor)
   _mem: null,
   _load() {
     if (this._mem) return this._mem;
