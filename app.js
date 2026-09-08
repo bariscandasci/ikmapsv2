@@ -656,7 +656,7 @@ function buildDolmusAlternative(origin, dest, originLabel, destLabel, officialMi
 // ---------------------------------------------------------------------------
 
 const TransitCache = {
-  KEY: "ik_ulasim_cache_v19", // v19: ana rota SADECE resmi taşımayla hesaplanıyor, dolmuş ayrı bir "alternatif" olarak gösteriliyor
+  KEY: "ik_ulasim_cache_v20", // v20: GOP Metro İstasyonu/Çimşit Park gibi 5 koordinatsız durak aynı isimli ikiziyle eşleştirildi
   _mem: null,
   _load() {
     if (this._mem) return this._mem;
@@ -874,7 +874,7 @@ function loadDolmusLines() {
 function loadLocalTransitNetwork() {
   if (localTransitNetworkPromise) return localTransitNetworkPromise;
   localTransitNetworkPromise = Promise.all([
-    fetch("transit_network.json?v=3").then((res) => res.json()),
+    fetch("transit_network.json?v=4").then((res) => res.json()),
     loadDolmusLines(),
   ])
     .then(([egoData, dolmusData]) => {

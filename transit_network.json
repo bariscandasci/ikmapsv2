@@ -64598,7 +64598,9 @@
       "id": "ego_41679",
       "name": "BARAJ MESİRE ALANI",
       "address": "-",
-      "coordSource": "ekstrapolasyon"
+      "coordSource": "aynı isimli durağın (ego_41403) koordinatından eşleştirildi — 2026-09-08",
+      "lat": 39.9982066,
+      "lng": 32.9099871
     },
     {
       "id": "ego_41680",
@@ -77866,7 +77868,9 @@
       "id": "ego_51563",
       "name": "ÇİMŞİT PARK",
       "address": "-",
-      "coordSource": "ekstrapolasyon"
+      "coordSource": "aynı isimli durağın (ego_56834) koordinatından eşleştirildi — 2026-09-08",
+      "lat": 39.997763,
+      "lng": 32.738529
     },
     {
       "id": "ego_51564",
@@ -78837,7 +78841,9 @@
       "id": "ego_53023",
       "name": "MEHMET EMİN YURDAKUL CD.",
       "address": "-",
-      "coordSource": "ekstrapolasyon"
+      "coordSource": "aynı isimli durağın (ego_53024) koordinatından eşleştirildi — 2026-09-08",
+      "lat": 39.580616,
+      "lng": 32.132311
     },
     {
       "id": "ego_53024",
@@ -79805,13 +79811,17 @@
       "id": "ego_53157",
       "name": "GOP METRO İSTASYONU",
       "address": "-",
-      "coordSource": "ekstrapolasyon"
+      "coordSource": "aynı isimli durağın (ego_M16) koordinatından eşleştirildi — 2026-09-08",
+      "lat": 39.9855725,
+      "lng": 32.5743427
     },
     {
       "id": "ego_53158",
       "name": "GOP METRO İSTASYONU",
       "address": "-",
-      "coordSource": "ekstrapolasyon"
+      "coordSource": "aynı isimli durağın (ego_M16) koordinatından eşleştirildi — 2026-09-08",
+      "lat": 39.9855725,
+      "lng": 32.5743427
     },
     {
       "id": "ego_53159",
