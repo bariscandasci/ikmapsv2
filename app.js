@@ -184,13 +184,20 @@ function roundTo5(n) {
 // hattı tam kullanan metro rotası bulunabiliyordu ama toplamda tüm-otobüs
 // alternatifiyle neredeyse berabere kalıyordu). Metro/Ankaray hızı, raylı
 // sistemin trafikten bağımsız olmasını yansıtacak şekilde hafif yükseltildi.
-const MODE_SPEED_KMH = { otobus: 16, metro: 33, ankaray: 33, tren: 45 };
+const MODE_SPEED_KMH = { otobus: 16, metro: 33, ankaray: 33, tren: 45, dolmus: 20 };
 const WALK_SPEED_KMH = 4.5;
 const STOP_DWELL_MIN = 0.4;
-// 7→5 dk: iki aktarmalı bir rotada (ör. otobüs→metro→otobüs) eski değer
-// tek başına ~14 dk'lık bir ceza demekti — bu, metronun hız avantajını
-// gereksiz yere eziyordu. 5 dk hâlâ anlamlı bir bekleme/yürüme cezası.
-const TRANSFER_PENALTY_MIN = 5;
+// Sabit bir "aktarma cezası" yerine, her araca binişte (ilk biniş DAHİL,
+// sadece aktarmalarda değil) o modun ortalama sefer sıklığının yarısı kadar
+// bekleme süresi ekleniyor — gerçekte otobüs/metro tam istediğin an orada
+// olmuyor. Başkentray için OSM'den çekilen gerçek "interval" etiketi (15 dk)
+// kullanıldı; otobüs/metro/Ankaray için Ankara'da bilinen tipik sefer
+// sıklıklarına dayalı makul ortalamalar. Aynı hatta kalmaya devam etmek
+// (biniş değişmiyorsa) hâlâ tamamen bedava.
+const MODE_HEADWAY_MIN = { otobus: 15, metro: 6, ankaray: 6, tren: 15, dolmus: 10 };
+function avgWaitMin(mode) {
+  return (MODE_HEADWAY_MIN[mode] !== undefined ? MODE_HEADWAY_MIN[mode] : MODE_HEADWAY_MIN.otobus) / 2;
+}
 const WALK_TRANSFER_MAX_KM = 0.35; // farklı hatların yakın duraklarını "aktarma" olarak bağlayan yürüme kenarları
 const NEAREST_STOP_SEARCH_KM = 1.2; // bir nokta çevresinde graf'a giriş/çıkış için aranan yarıçap
 const NEAREST_STOP_MAX_CANDIDATES = 6;
@@ -247,7 +254,8 @@ class MinHeap {
   }
 }
 
-let transitGraph = null; // buildTransitGraph() tamamlanınca dolar
+let transitGraph = null; // buildTransitGraph() tamamlanınca dolar — SADECE resmi hatlar (dolmuş hariç)
+let transitGraphWithDolmus = null; // dolmuş dahil tam graf — sadece "dolmuşla alternatif" kontrolü için
 
 /**
  * "tren" modundaki hatların çoğu (25'ten 22'si) YHT/ekspres gibi şehirlerarası
@@ -271,10 +279,12 @@ function isRoutableLine(line) {
  * - Yürüme/aktarma kenarları: ızgara komşuluğuyla (O(n²) tarama YOK)
  *   ≤350m'deki FARKLI duraklar arası.
  */
-function buildTransitGraph(network) {
+function buildTransitGraph(network, options) {
+  const excludeModes = (options && options.excludeModes) || new Set();
   const stopsById = new Map();
   const grid = new Map();
   network.stops.forEach((s) => {
+    if (excludeModes.has(s.mode)) return;
     if (typeof s.lat !== "number" || typeof s.lng !== "number") return;
     stopsById.set(s.id, s);
     const key = gridCellKey(s.lat, s.lng);
@@ -290,6 +300,7 @@ function buildTransitGraph(network) {
 
   const linesByLocalId = new Map();
   network.lines.forEach((line) => {
+    if (excludeModes.has(line.mode)) return;
     if (!isRoutableLine(line)) return;
     linesByLocalId.set(line.id, line);
     const speed = MODE_SPEED_KMH[line.mode] || MODE_SPEED_KMH.otobus;
@@ -403,19 +414,20 @@ function runDijkstra(graph, sources) {
       // gelindiği bilgisini taşımaya devam etseydi, yoğun aktarma
       // bölgelerinde (Kızılay gibi onlarca hattın kesiştiği duraklar)
       // yürüme zincirleri üzerinden durum sayısı katlanarak patlıyordu
-      // (bir seçim ~19 saniye sürüyordu). Aktarma cezası bu yüzden BİR KEZ,
-      // araçtan inip yürümeye başlarken uygulanıyor; nötr durumdan sonraki
-      // ilk biniş artık cezasız (zaten cezalandırıldı, iki kere sayılmıyor).
-      let transferCost = 0;
+      // (bir seçim ~19 saniye sürüyordu). Yürümenin kendisi bedava (sadece
+      // kendi süresi var); bekleme cezası SADECE bir araca binerken —
+      // ilk biniş dahil, sadece aktarmalarda değil — o hattın moduna göre
+      // uygulanıyor (bkz. avgWaitMin). Aynı hatta kalmaya devam etmek
+      // (biniş hattı değişmiyorsa) hâlâ tamamen bedava.
+      let waitCost = 0;
       let newLineKey;
       if (e.lineId) {
-        if (curLine && curLine !== e.lineId) transferCost = TRANSFER_PENALTY_MIN;
+        if (curLine !== e.lineId) waitCost = avgWaitMin(e.mode);
         newLineKey = e.lineId;
       } else {
-        if (curLine) transferCost = TRANSFER_PENALTY_MIN;
         newLineKey = NONE;
       }
-      const newMinutes = cur.minutes + e.minutes + transferCost;
+      const newMinutes = cur.minutes + e.minutes + waitCost;
       const newKey = e.to + "|" + newLineKey;
       const known = dist.get(newKey);
       if (known === undefined || newMinutes < known - 1e-9) {
@@ -434,27 +446,32 @@ function runDijkstra(graph, sources) {
 // diğerini döngüyle değiştiriyor; hangi taraf sabitse Dijkstra'yı SADECE
 // ondan bir kez çalıştırıp sonucu burada önbelleğe alıyoruz (aksi halde her
 // proje/ilçe çifti için ayrı bir tam graf taraması gerekirdi).
-let dijkstraCache = { key: null, result: null };
+// Graf başına ayrı önbellek (Map anahtarı graf nesnesinin kendisi) — hem
+// resmi graf (transitGraph) hem dolmuş dahil graf (transitGraphWithDolmus)
+// için aynı fonksiyonlar kullanılabilsin diye.
+const dijkstraCacheByGraph = new Map();
 
-function getDijkstraFrom(coords) {
+function getDijkstraFrom(coords, graph = transitGraph) {
   const key = coords.lat.toFixed(4) + "," + coords.lng.toFixed(4);
-  if (dijkstraCache.key === key) return dijkstraCache.result;
-  const sources = stopsWithinRadius(transitGraph, coords.lat, coords.lng, NEAREST_STOP_SEARCH_KM)
+  const cached = dijkstraCacheByGraph.get(graph);
+  if (cached && cached.key === key) return cached.result;
+  const sources = stopsWithinRadius(graph, coords.lat, coords.lng, NEAREST_STOP_SEARCH_KM)
     .slice(0, NEAREST_STOP_MAX_CANDIDATES)
     .map(({ stop, km }) => ({ stopId: stop.id, startMinutes: walkMinutes(km) }));
-  const result = runDijkstra(transitGraph, sources);
-  dijkstraCache = { key, result };
+  const result = runDijkstra(graph, sources);
+  dijkstraCacheByGraph.set(graph, { key, result });
   return result;
 }
 
 /**
- * originCoords/destCoords: {lat, lng}. Dönüş: { totalMinutes, pathStopIds, edgeAtStop }
- * ya da her iki nokta arasında (1.2km içinde hiç durak yoksa) null.
+ * originCoords/destCoords: {lat, lng}. graph verilmezse resmi graf kullanılır.
+ * Dönüş: { totalMinutes, pathStopIds, edgeAtStop } ya da her iki nokta
+ * arasında (1.2km içinde hiç durak yoksa) null.
  */
-function findRealRoute(originCoords, destCoords) {
-  if (!transitGraph) return null;
-  const { prev, keyStopId, bestAtStop, bestStateAtStop } = getDijkstraFrom(originCoords);
-  const destCandidates = stopsWithinRadius(transitGraph, destCoords.lat, destCoords.lng, NEAREST_STOP_SEARCH_KM).slice(
+function findRealRoute(originCoords, destCoords, graph = transitGraph) {
+  if (!graph) return null;
+  const { prev, keyStopId, bestAtStop, bestStateAtStop } = getDijkstraFrom(originCoords, graph);
+  const destCandidates = stopsWithinRadius(graph, destCoords.lat, destCoords.lng, NEAREST_STOP_SEARCH_KM).slice(
     0,
     NEAREST_STOP_MAX_CANDIDATES
   );
@@ -584,7 +601,54 @@ function estimateTransit(origin, dest) {
   const routeSummary = `${rideSteps.length ? rideSteps.map((s) => s.line).join(" + ") : "Yürüyüş"} (${destLabel} civarı)`;
   const verified = steps.every((s) => s.verified);
 
-  return { durationMin, transfers, routeSummary, steps, distanceKm, verified };
+  const dolmusAlternative = buildDolmusAlternative(origin, dest, originLabel, destLabel, route.totalMinutes);
+
+  return { durationMin, transfers, routeSummary, steps, distanceKm, verified, dolmusAlternative };
+}
+
+// Ana rota SADECE resmi taşımayla (yukarıda) hesaplanır — dolmuş, resmi
+// olmayan/gayriresmi bir hizmet olduğu için sıralama/eşleştirmeye hiç
+// karışmıyor. Burada, dolmuş dahil TAM graf üzerinde AYRI bir Dijkstra
+// çalıştırılıp, sadece gerçekten (a) en az bir dolmuş adımı içeren VE
+// (b) resmi rotadan belirgin ölçüde (>=5 dk) daha hızlı bir yol varsa,
+// bu "alternatif" olarak ayrıca döndürülür — kullanıcının kendi isteğiyle
+// (rota kısmında dolmuşu ayrı bir yerde göstermek) birebir örtüşüyor.
+const DOLMUS_ALT_MIN_SAVING_MIN = 5;
+
+function buildDolmusAlternative(origin, dest, originLabel, destLabel, officialMinutes) {
+  if (!transitGraphWithDolmus) return null;
+
+  const altRoute = findRealRoute(origin.coords, dest.coords, transitGraphWithDolmus);
+  if (!altRoute) return null;
+  if (officialMinutes - altRoute.totalMinutes < DOLMUS_ALT_MIN_SAVING_MIN) return null;
+
+  const altSteps = pathToSteps(altRoute.pathStopIds, altRoute.edgeAtStop, transitGraphWithDolmus);
+  const usesDolmus = altSteps.some((s) => s.mode === "dolmus");
+  if (!usesDolmus) return null;
+
+  const firstStop = transitGraphWithDolmus.stopsById.get(altRoute.pathStopIds[0]);
+  const lastStop = transitGraphWithDolmus.stopsById.get(altRoute.pathStopIds[altRoute.pathStopIds.length - 1]);
+  const firstWalkKm = haversineKm(origin.coords, { lat: firstStop.lat, lng: firstStop.lng });
+  const lastWalkKm = haversineKm({ lat: lastStop.lat, lng: lastStop.lng }, dest.coords);
+
+  if (lastWalkKm > WALK_STEP_MIN_KM) {
+    altSteps.push({ mode: "hub", line: "Yürüyüş", from: lastStop.name, to: destLabel, verified: true, lineId: null });
+  }
+  if (firstWalkKm > WALK_STEP_MIN_KM) {
+    altSteps.unshift({ mode: "hub", line: "Yürüyüş", from: originLabel, to: firstStop.name, verified: true, lineId: null });
+  }
+
+  const altRideSteps = altSteps.filter((s) => s.lineId);
+  const durationMin = Math.max(roundTo5(altRoute.totalMinutes), 5);
+  const routeSummary = altRideSteps.length ? altRideSteps.map((s) => s.line).join(" + ") : "Yürüyüş";
+
+  return {
+    durationMin,
+    transfers: Math.max(altRideSteps.length - 1, 0),
+    routeSummary,
+    steps: altSteps,
+    savingMin: roundTo5(officialMinutes - altRoute.totalMinutes),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -592,7 +656,7 @@ function estimateTransit(origin, dest) {
 // ---------------------------------------------------------------------------
 
 const TransitCache = {
-  KEY: "ik_ulasim_cache_v16", // v16: yürüme kenarlarının durum patlamasına yol açan hat-bağlamı taşıma hatası düzeltildi (performans)
+  KEY: "ik_ulasim_cache_v19", // v19: ana rota SADECE resmi taşımayla hesaplanıyor, dolmuş ayrı bir "alternatif" olarak gösteriliyor
   _mem: null,
   _load() {
     if (this._mem) return this._mem;
@@ -796,11 +860,28 @@ let localTransitNetworkPromise = null;
 let linesByLocalStopId = null;
 let localStopsById = null;
 
+// Dolmuş hatları EGO'nun kendi kaynağında yok (dolmuşlar EGO'ya değil özel/
+// kooperatif işletmecilere ait, hiçbir resmi kayıt yayınlanmıyor). Bu yüzden
+// ayrı bir dosyada, dolmusla.com'un herkese açık (robots.txt'i tamamen
+// serbest) güzergah haritasından alınan gerçek koordinat dizileriyle
+// tutuluyor — EGO verisiyle karışmasın, kaynağı ayrı belli olsun diye.
+function loadDolmusLines() {
+  return fetch("dolmus_lines.json?v=1")
+    .then((res) => res.json())
+    .catch(() => ({ stops: [], lines: [] }));
+}
+
 function loadLocalTransitNetwork() {
   if (localTransitNetworkPromise) return localTransitNetworkPromise;
-  localTransitNetworkPromise = fetch("transit_network.json?v=3")
-    .then((res) => res.json())
-    .then((data) => {
+  localTransitNetworkPromise = Promise.all([
+    fetch("transit_network.json?v=3").then((res) => res.json()),
+    loadDolmusLines(),
+  ])
+    .then(([egoData, dolmusData]) => {
+      const data = {
+        stops: egoData.stops.concat(dolmusData.stops),
+        lines: egoData.lines.concat(dolmusData.lines),
+      };
       localTransitNetwork = data;
       localStopsById = Object.fromEntries(data.stops.map((s) => [s.id, s]));
       linesByLocalStopId = {};
@@ -813,7 +894,14 @@ function loadLocalTransitNetwork() {
       // kadar estimateTransit() kaba bir geçici tahmin döner; kurulur kurulmaz
       // (henüz bir arama gösteriliyorsa) sonuçlar sessizce gerçek rotayla
       // güncellensin diye mevcut arama tekrar çalıştırılır.
-      transitGraph = buildTransitGraph(data);
+      //
+      // İKİ AYRI GRAF: ana rota (transitGraph) SADECE resmi hatlarla (EGO
+      // otobüs/metro/Ankaray/Başkentray) hesaplanır — dolmuş, resmi olmayan/
+      // gayriresmi bir hizmet olduğu için ana süreye/sıralamaya sessizce
+      // karışmıyor. transitGraphWithDolmus, SADECE "dolmuşla alternatif var
+      // mı" kontrolü için kullanılan ikinci, dolmuş dahil tam graf.
+      transitGraph = buildTransitGraph(data, { excludeModes: new Set(["dolmus"]) });
+      transitGraphWithDolmus = buildTransitGraph(data, {});
       if (typeof runSearch === "function") runSearch();
       return data;
     })
@@ -1123,10 +1211,10 @@ function durationBucket(min) {
   return { key: "bad", label: "60+ dk", color: "#dc2626" };
 }
 
-const MODE_ICON = { metro: "🚇", ankaray: "🚊", tren: "🚆", otobus: "🚌", hub: "📍" };
+const MODE_ICON = { metro: "🚇", ankaray: "🚊", tren: "🚆", otobus: "🚌", dolmus: "🚐", hub: "📍" };
 // Haritada bacak başına renk: gerçek dünyadaki Ankara toplu taşıma renklerine
 // yakın bir palet (M4 turuncu/sarı, Ankaray yeşil, Başkentray mor, otobüs teal).
-const MODE_LINE_COLOR = { metro: "#dc2626", ankaray: "#16a34a", tren: "#7c3aed", otobus: "#0d9488", hub: "#64748b" };
+const MODE_LINE_COLOR = { metro: "#dc2626", ankaray: "#16a34a", tren: "#7c3aed", otobus: "#0d9488", dolmus: "#f59e0b", hub: "#64748b" };
 
 /**
  * estimate.steps dizisinden, "hangi hatta binip nerede inecek" şeklinde
@@ -1279,6 +1367,7 @@ const routeDetail = document.getElementById("routeDetail");
 const routeDetailTitle = document.getElementById("routeDetailTitle");
 const routeDetailSteps = document.getElementById("routeDetailSteps");
 const routeDetailWarning = document.getElementById("routeDetailWarning");
+const routeDolmusAlt = document.getElementById("routeDolmusAlt");
 const addressInput = document.getElementById("addressInput");
 const addressSearchBtn = document.getElementById("addressSearchBtn");
 const addressStatus = document.getElementById("addressStatus");
@@ -1747,9 +1836,15 @@ function drawRoute(originCoords, row, bucket, destCoordsOverride) {
   const geometryOfStep = (s) => {
     const line = lineOfStep(s);
     if (line && line.geometry && line.geometry.length > 1) return line.geometry;
-    if (s.lineId && transitGraph && transitGraph.linesByLocalId.has(s.lineId) && localTransitGeometry) {
-      const geo = localTransitGeometry[s.lineId];
-      if (geo && geo.length > 1) return geo;
+    if (s.lineId && transitGraph && transitGraph.linesByLocalId.has(s.lineId)) {
+      const graphLine = transitGraph.linesByLocalId.get(s.lineId);
+      // Dolmuş hatları gibi kendi geometrisini doğrudan taşıyan graf hatları
+      // (ayrı bir localTransitGeometry dosyasına ihtiyaç duymadan).
+      if (graphLine.geometry && graphLine.geometry.length > 1) return graphLine.geometry;
+      if (localTransitGeometry) {
+        const geo = localTransitGeometry[s.lineId];
+        if (geo && geo.length > 1) return geo;
+      }
     }
     return null;
   };
@@ -1833,6 +1928,22 @@ function showRouteResult(estimate) {
   routeDetailTitle.innerHTML = `Rota Detayı · ${estimate.transfers} aktarma · ~${estimate.durationMin} dk`;
   routeDetailSteps.innerHTML = renderRouteSteps(estimate.steps);
   routeDetailWarning.classList.toggle("hidden", estimate.verified);
+
+  const alt = estimate.dolmusAlternative;
+  routeDolmusAlt.classList.toggle("hidden", !alt);
+  if (alt) {
+    routeDolmusAlt.innerHTML = `
+      <div class="text-[11px] font-semibold text-amber-700 uppercase tracking-wide mb-1.5">
+        🚐 Dolmuşla alternatif · ~${alt.durationMin} dk (${alt.savingMin} dk daha hızlı)
+      </div>
+      <div class="text-[10px] text-slate-400 mb-1.5">
+        Gayriresmi/kooperatif işletmeciler tarafından çalıştırılır, EGO'ya kayıtlı değildir — sefer sıklığı/güzergah İK tarafından adaya kesin bilgi gibi aktarılmamalıdır.
+      </div>
+      ${renderRouteSteps(alt.steps)}`;
+  } else {
+    routeDolmusAlt.innerHTML = "";
+  }
+
   routeDetail.classList.remove("hidden");
 }
 
