@@ -1484,7 +1484,9 @@ modeButtons.forEach((btn) => {
     currentMode = btn.dataset.mode;
     modeButtons.forEach((b) => b.classList.toggle("mode-btn-active", b === btn));
     originPanel.classList.toggle("hidden", currentMode !== "origin-to-project");
-    projectPanel.classList.toggle("hidden", currentMode !== "project-to-origin");
+    // Hem "Proje -> Aday Havuzu" hem "Proje -> Gerçek Adaylar" aynı proje
+    // seçim kutusunu (panel-project) kullanır.
+    projectPanel.classList.toggle("hidden", currentMode === "origin-to-project");
     clearResults();
   });
 });
@@ -1566,7 +1568,7 @@ const currentDiscoveryByOriginId = {};
 // her iki mod için de doğru şekilde belirler.
 function isActiveSelection(id) {
   if (currentMode === "origin-to-project") return originSelect.value === id;
-  if (currentMode === "project-to-origin") return projectSelect.value === id;
+  if (currentMode === "project-to-origin" || currentMode === "project-to-candidates") return projectSelect.value === id;
   return false;
 }
 
@@ -1664,6 +1666,11 @@ function runSearch() {
   if (currentMode === "origin-to-project") {
     if (!originSelect.value) return clearResults();
     renderOriginToProject(originSelect.value);
+  } else if (currentMode === "project-to-candidates") {
+    // candidates.js içinde tanımlanır — Excel'den yüklenen gerçek adayları
+    // seçilen projeye göre sıralayan ayrı bir mod.
+    if (!projectSelect.value) return clearResults();
+    renderProjectToCandidates(projectSelect.value);
   } else {
     if (!projectSelect.value) return clearResults();
     renderProjectToOrigin(projectSelect.value);
@@ -2192,7 +2199,11 @@ function applyLiveProjects(projects) {
   TransitCache.clearAll();
   if (currentMode === "origin-to-project" && originSelect.value) {
     runSearch();
-  } else if (currentMode === "project-to-origin" && projectSelect.value && !activeProjects().some((p) => p.id === projectSelect.value)) {
+  } else if (
+    (currentMode === "project-to-origin" || currentMode === "project-to-candidates") &&
+    projectSelect.value &&
+    !activeProjects().some((p) => p.id === projectSelect.value)
+  ) {
     clearResults();
   } else {
     runSearch();
