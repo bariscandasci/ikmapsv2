@@ -2296,6 +2296,7 @@ addProjectForm.addEventListener("submit", async (e) => {
       transport: fd.get("transport").trim(),
       referral: fd.get("referral").trim(),
       gender: fd.get("gender"),
+      capacity: fd.get("capacity").trim(),
       urgent: false,
       active: true,
     };

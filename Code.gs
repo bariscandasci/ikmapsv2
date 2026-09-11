@@ -10,8 +10,24 @@ const SHEET_NAME = "Projeler";
 const FIELDS = [
   "id", "name", "sector", "address", "lat", "lng", "accessStopId",
   "shift", "salary", "meal", "transport", "referral", "gender",
-  "urgent", "active",
+  "urgent", "active", "capacity",
 ];
+
+/**
+ * "capacity" (kontenjan) sonradan eklenen bir alan — canlı Sheet'in başlık
+ * satırında henüz yoksa (ör. bu kod ilk kez deploy edildiğinde) burada
+ * otomatik olarak bir sütun başlığı ekler. Böylece kullanıcı Sheet'i elle
+ * düzenlemek zorunda kalmaz. Mevcut satırlardaki capacity hücresi boş
+ * kalır — boş = sınırsız kontenjan olarak yorumlanır (bkz. candidates.js).
+ */
+function ensureCapacityColumn_() {
+  const sheet = getSheet_();
+  const lastCol = sheet.getLastColumn();
+  const header = sheet.getRange(1, 1, 1, lastCol).getValues()[0].map(String);
+  if (!header.includes("capacity")) {
+    sheet.getRange(1, lastCol + 1).setValue("capacity");
+  }
+}
 
 // Aday yorumları — "Comments" sekmesi. Bu sekmenin kendi id sütunu yok; bir
 // satır candidateId+candidateName+author+text+createdAt ile tanımlanır.
@@ -63,6 +79,9 @@ function readAllRows_() {
           v = v === true || v === "TRUE" || v === "true";
         } else if (key === "lat" || key === "lng") {
           v = Number(v);
+        } else if (key === "capacity") {
+          // Boş hücre = sınırsız kontenjan (null); dolu hücre sayıya çevrilir.
+          v = v === "" || v == null ? null : Number(v);
         } else {
           v = v == null ? "" : String(v);
         }
@@ -82,6 +101,7 @@ function findRowIndexById_(id) {
 }
 
 function doGet(e) {
+  ensureCapacityColumn_();
   const projects = readAllRows_();
   const comments = readAllComments_();
   return ContentService.createTextOutput(JSON.stringify({ ok: true, projects, comments }))
@@ -107,6 +127,7 @@ function doPost(e) {
   lock.waitLock(30000);
   try {
     if (action === "add") {
+      ensureCapacityColumn_();
       const p = body.project || {};
       if (!p.name) return jsonError_("name zorunlu");
       const id = p.id || ("proj_" + p.name.toLowerCase()
@@ -145,6 +166,7 @@ function doPost(e) {
     // patch yalnızca kendi hücresine yazılıyor; başka hiçbir hücreye
     // dokunulmuyor.)
     if (action === "updateBatch") {
+      ensureCapacityColumn_();
       const patches = body.patches || []; // [{ id, patch }, ...]
       const header = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0].map(String);
       const idCol = header.indexOf("id");

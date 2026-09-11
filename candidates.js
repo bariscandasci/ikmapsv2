@@ -970,3 +970,236 @@ function wireCommentForm(candidateId, candidateName, listEl, existingComments) {
     }
   });
 }
+
+// ---------------------------------------------------------------------------
+// 8) TOPLU EŞLEŞTİRME — kapasiteli, aç gözlü (greedy) çoklu-proje eşleştirme
+// ---------------------------------------------------------------------------
+// Tek tek "Proje -> Gerçek Adaylar" bakışı, aynı iyi adayları HER projeye
+// ayrı ayrı öneriyor — aynı kişi birden fazla projeye "en iyi seçenek" gibi
+// görünüp İK'nın farkında olmadan aynı adayı iki yere birden yönlendirmesine
+// yol açabiliyordu; ayrıca hiçbir yerde "bu projeye kaç kişi lazım" bilgisi
+// tutulmuyordu. Bu bölüm, seçilen birkaç açık proje için TÜM adayları bir
+// arada değerlendirip, en yüksek puanlı eşleşmeden başlayarak (aç gözlü)
+// her adayı EN FAZLA BİR projeye, kontenjan doldukça sıradaki adaya geçerek
+// atar. Tam optimal değildir (o, Macar algoritması/atama problemi çözümü
+// gerektirir) ama gerçek problemi — aynı adayın birden fazla yere
+// önerilmesini ve kontenjansız atamayı — hemen, anlaşılır şekilde çözer.
+
+const batchMatchBtn = document.getElementById("batchMatchBtn");
+const batchMatchView = document.getElementById("batchMatchView");
+const batchMatchBackBtn = document.getElementById("batchMatchBackBtn");
+const batchMatchRunBtn = document.getElementById("batchMatchRunBtn");
+const batchMatchStatus = document.getElementById("batchMatchStatus");
+const batchMatchProjectList = document.getElementById("batchMatchProjectList");
+const batchMatchResults = document.getElementById("batchMatchResults");
+
+/** capacity alanı boş/tanımsız/geçersizse sınırsız kabul edilir. */
+function projectCapacity(project) {
+  const c = project.capacity;
+  if (c == null || c === "") return Infinity;
+  const n = Number(c);
+  return Number.isFinite(n) && n >= 0 ? n : Infinity;
+}
+
+function openBatchMatchView() {
+  batchMatchView.classList.remove("hidden");
+  mainLayout.classList.add("hidden");
+  batchMatchResults.innerHTML = `<div class="text-sm text-slate-400">Soldan proje(ler) seçip "Eşleştir"e bas.</div>`;
+  batchMatchStatus.textContent = "";
+  renderBatchMatchProjectList();
+}
+
+function closeBatchMatchView() {
+  batchMatchView.classList.add("hidden");
+  mainLayout.classList.remove("hidden");
+}
+
+batchMatchBtn.addEventListener("click", openBatchMatchView);
+batchMatchBackBtn.addEventListener("click", closeBatchMatchView);
+
+function renderBatchMatchProjectList() {
+  const bySector = {};
+  activeProjects().forEach((p) => (bySector[p.sector] = bySector[p.sector] || []).push(p));
+  const sectors = Object.keys(bySector).sort();
+
+  batchMatchProjectList.innerHTML = sectors
+    .map((sector) => {
+      const rows = bySector[sector]
+        .slice()
+        .sort((a, b) => a.name.localeCompare(b.name, "tr"))
+        .map(
+          (p) => `
+          <div class="flex items-center gap-2 py-1.5">
+            <input type="checkbox" class="batch-project-checkbox" data-project-id="${p.id}" />
+            <div class="flex-1 min-w-0">
+              <div class="text-xs font-medium text-slate-700 truncate">${p.name}</div>
+              <div class="text-[10px] text-slate-400 truncate">${p.address}</div>
+            </div>
+            <input type="number" min="0" placeholder="Sınırsız" data-project-id="${p.id}"
+              class="batch-project-capacity w-16 border border-slate-200 rounded-md px-1.5 py-1 text-xs"
+              value="${p.capacity != null ? p.capacity : ""}" />
+          </div>`
+        )
+        .join("");
+      return `
+        <div>
+          <div class="text-[10px] font-semibold text-slate-400 uppercase tracking-wide px-1 pt-1">${sector}</div>
+          ${rows}
+        </div>`;
+    })
+    .join("");
+}
+
+batchMatchRunBtn.addEventListener("click", async () => {
+  const checkboxes = Array.from(batchMatchProjectList.querySelectorAll(".batch-project-checkbox:checked"));
+  const projectIds = checkboxes.map((cb) => cb.dataset.projectId);
+  if (!projectIds.length) {
+    batchMatchStatus.textContent = "Önce en az bir proje seç.";
+    return;
+  }
+
+  batchMatchRunBtn.disabled = true;
+  batchMatchStatus.textContent = "Kontenjanlar kaydediliyor…";
+
+  // Kontenjan değişikliklerini kaydet (sadece seçili projeler için, sadece
+  // gerçekten değişenler) — aynı urgent/inactive modallarındaki gibi tek
+  // istekte toplu güncelleme.
+  const patches = [];
+  projectIds.forEach((id) => {
+    const input = batchMatchProjectList.querySelector(`.batch-project-capacity[data-project-id="${id}"]`);
+    const project = ANKARA_DATA.projects.find((p) => p.id === id);
+    const rawValue = input.value.trim();
+    const newCapacity = rawValue === "" ? "" : Number(rawValue);
+    const currentCapacity = project.capacity != null ? project.capacity : "";
+    if (String(newCapacity) !== String(currentCapacity)) {
+      patches.push({ id, patch: { capacity: newCapacity } });
+    }
+  });
+
+  if (patches.length) {
+    try {
+      const { updatedIds } = await postBatchUpdate(patches);
+      patches.forEach(({ id, patch }) => {
+        if (updatedIds.has(id)) {
+          const project = ANKARA_DATA.projects.find((p) => p.id === id);
+          if (project) project.capacity = patch.capacity === "" ? null : patch.capacity;
+        }
+      });
+      saveProjectsCache();
+    } catch {
+      batchMatchStatus.textContent = "Kontenjanlar kaydedilemedi — internet bağlantısını kontrol et.";
+      batchMatchRunBtn.disabled = false;
+      return;
+    }
+  }
+
+  batchMatchStatus.textContent = "Eşleştiriliyor…";
+  batchMatchResults.innerHTML = `<div class="text-sm text-slate-400">Adaylar puanlanıyor…</div>`;
+
+  try {
+    const { assignmentsByProject, unassigned, projects } = await runBatchMatch(projectIds);
+    renderBatchMatchResults(assignmentsByProject, unassigned, projects);
+    batchMatchStatus.textContent = "";
+  } catch {
+    batchMatchStatus.textContent = "Eşleştirme başarısız oldu.";
+  } finally {
+    batchMatchRunBtn.disabled = false;
+  }
+});
+
+/**
+ * Seçilen projeler için TÜM adayları puanlayıp, en yüksek puandan başlayarak
+ * aç gözlü şekilde atar: bir aday zaten bir projeye atandıysa veya bir
+ * projenin kontenjanı dolduysa o eşleşme atlanır. Tam optimal değildir (bkz.
+ * dosya başındaki not) ama O(n·m log(n·m)) karmaşıklığıyla yüzlerce aday ×
+ * birkaç proje için anında çalışır.
+ */
+async function runBatchMatch(projectIds) {
+  const projects = projectIds.map((id) => ANKARA_DATA.projects.find((p) => p.id === id)).filter(Boolean);
+  const candidates = CandidateStore.all();
+
+  const allTriples = [];
+  for (const project of projects) {
+    const results = await Promise.all(candidates.map((c) => scoreCandidateForProject(c, project)));
+    results.forEach((result) => {
+      if (!result.eliminated) allTriples.push({ project, result });
+    });
+  }
+  allTriples.sort((a, b) => b.result.total - a.result.total);
+
+  const capacityLeft = new Map(projects.map((p) => [p.id, projectCapacity(p)]));
+  const assignedCandidateIds = new Set();
+  const assignmentsByProject = new Map(projects.map((p) => [p.id, []]));
+  const consideredCandidateIds = new Set();
+
+  allTriples.forEach(({ project, result }) => {
+    consideredCandidateIds.add(result.candidate.id);
+    if (assignedCandidateIds.has(result.candidate.id)) return;
+    if (capacityLeft.get(project.id) <= 0) return;
+    assignmentsByProject.get(project.id).push(result);
+    assignedCandidateIds.add(result.candidate.id);
+    capacityLeft.set(project.id, capacityLeft.get(project.id) - 1);
+  });
+
+  // "Yerleştirilemeyen" = en az bir seçili projeye uygundu ama kontenjan
+  // yüzünden yer bulamadı (tamamen elenenler burada gösterilmez, onlar zaten
+  // hiçbir projeye uygun değildi — ayrı bir sorun).
+  const unassigned = candidates.filter(
+    (c) => consideredCandidateIds.has(c.id) && !assignedCandidateIds.has(c.id)
+  );
+
+  return { assignmentsByProject, unassigned, projects };
+}
+
+function renderBatchMatchResults(assignmentsByProject, unassigned, projects) {
+  const totalAssigned = Array.from(assignmentsByProject.values()).reduce((sum, list) => sum + list.length, 0);
+
+  const projectSectionsHtml = projects
+    .map((p) => {
+      const list = assignmentsByProject.get(p.id) || [];
+      const capacity = projectCapacity(p);
+      const capacityLabel = capacity === Infinity ? "sınırsız" : capacity;
+      const rowsHtml = list.length
+        ? list
+            .map(
+              (r) => `
+              <div class="flex items-center justify-between gap-2 py-1.5 border-b border-slate-50 last:border-0">
+                <div class="min-w-0">
+                  <div class="text-sm font-medium text-slate-800 truncate">${r.candidate.fullName || "İsimsiz aday"}</div>
+                  <div class="text-xs text-slate-400">${r.candidate.phoneRaw || "-"}</div>
+                </div>
+                <span class="shrink-0 text-xs font-bold px-2 py-0.5 rounded-full bg-indigo-100 text-indigo-700">${r.total} p</span>
+              </div>`
+            )
+            .join("")
+        : `<div class="text-xs text-slate-400 py-2">Bu projeye uygun aday bulunamadı.</div>`;
+
+      return `
+        <div class="bg-white border border-slate-200 rounded-lg p-4 mb-4">
+          <div class="flex items-baseline justify-between gap-2 mb-2">
+            <div class="text-sm font-bold text-slate-800">${p.name}</div>
+            <div class="text-xs text-slate-400 whitespace-nowrap">${list.length} / ${capacityLabel}</div>
+          </div>
+          ${rowsHtml}
+        </div>`;
+    })
+    .join("");
+
+  const unassignedHtml = unassigned.length
+    ? `
+      <div class="bg-amber-50 border border-amber-200 rounded-lg p-4">
+        <div class="text-sm font-bold text-amber-800 mb-2">Yerleştirilemeyen Adaylar (${unassigned.length})</div>
+        <p class="text-xs text-amber-700 mb-2 leading-snug">Bu adaylar seçili projelerden en az birine uygundu ama kontenjan dolduğu için başka bir adaya yer açıldı.</p>
+        <div class="flex flex-wrap gap-1.5">
+          ${unassigned.map((c) => `<span class="text-xs bg-white border border-amber-200 rounded-full px-2 py-1 text-amber-700">${c.fullName || "İsimsiz aday"}</span>`).join("")}
+        </div>
+      </div>`
+    : "";
+
+  batchMatchResults.innerHTML = `
+    <div class="max-w-3xl">
+      <div class="text-xs text-slate-500 mb-4">${totalAssigned} aday, ${projects.length} projeye dağıtıldı.</div>
+      ${projectSectionsHtml}
+      ${unassignedHtml}
+    </div>`;
+}
