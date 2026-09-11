@@ -616,7 +616,14 @@ function buildCandidateFsRow(r) {
   return row;
 }
 
-function renderCandidateDetail(r) {
+/**
+ * Bir aday sonucundan ({candidate, estimate, breakdown, total, eliminated,
+ * reasons} — scoreCandidateForProject çıktısı) detay panelinin HTML'ini
+ * üretir. Hem "Proje -> Gerçek Adaylar" tam ekranındaki sağ panelde hem de
+ * Toplu Eşleştirme sonuçlarındaki aday satırına tıklanınca açılan modalda
+ * kullanılır — yorumlar dahil aynı görünüm, TEKRAR YAZILMAZ.
+ */
+function buildCandidateDetailHtml(r) {
   const c = r.candidate;
   const freshnessBasis = c.appliedAt || c.uploadedAt;
   const staleDays = daysSince(freshnessBasis);
@@ -691,9 +698,32 @@ function renderCandidateDetail(r) {
       <div id="candidateCommentsSection"></div>
     </div>`;
 
-  candidateFsDetail.innerHTML = `<div class="max-w-xl">${headerHtml}${eliminationHtml}${scoreBarsHtml}${routeHtml}${infoHtml}${commentsHtml}</div>`;
-  renderCommentsSection(c.id, c.fullName);
+  return `<div class="max-w-xl">${headerHtml}${eliminationHtml}${scoreBarsHtml}${routeHtml}${infoHtml}${commentsHtml}</div>`;
 }
+
+function renderCandidateDetail(r) {
+  candidateFsDetail.innerHTML = buildCandidateDetailHtml(r);
+  renderCommentsSection(r.candidate.id, r.candidate.fullName);
+}
+
+const batchCandidateModal = document.getElementById("batchCandidateModal");
+const batchCandidateModalBody = document.getElementById("batchCandidateModalBody");
+const batchCandidateModalClose = document.getElementById("batchCandidateModalClose");
+
+function openBatchCandidateModal(r) {
+  batchCandidateModalBody.innerHTML = buildCandidateDetailHtml(r);
+  batchCandidateModal.classList.remove("hidden");
+  selectedCandidateId = r.candidate.id; // renderCommentsSection'ın "hâlâ güncel mi" kontrolü için
+  renderCommentsSection(r.candidate.id, r.candidate.fullName);
+}
+function closeBatchCandidateModal() {
+  batchCandidateModal.classList.add("hidden");
+  batchCandidateModalBody.innerHTML = "";
+}
+batchCandidateModalClose.addEventListener("click", closeBatchCandidateModal);
+batchCandidateModal.addEventListener("click", (e) => {
+  if (e.target === batchCandidateModal) closeBatchCandidateModal();
+});
 
 // ---------------------------------------------------------------------------
 // 6) UI — Excel yükleme + sütun eşleme modalı
@@ -993,6 +1023,16 @@ const batchMatchStatus = document.getElementById("batchMatchStatus");
 const batchMatchProjectList = document.getElementById("batchMatchProjectList");
 const batchMatchResults = document.getElementById("batchMatchResults");
 
+// Sonuç listesi her eşleştirmede baştan çiziliyor (innerHTML) — bu yüzden
+// tek tek satırlara değil, konteynerin kendisine (event delegation) bir kez
+// bağlanıyor.
+batchMatchResults.addEventListener("click", (e) => {
+  const row = e.target.closest(".batch-candidate-row");
+  if (!row) return;
+  const r = lastBatchResultsByCandidateId.get(row.dataset.candidateId);
+  if (r) openBatchCandidateModal(r);
+});
+
 /** capacity alanı boş/tanımsız/geçersizse sınırsız kabul edilir. */
 function projectCapacity(project) {
   const c = project.capacity;
@@ -1151,8 +1191,18 @@ async function runBatchMatch(projectIds) {
   return { assignmentsByProject, unassigned, projects };
 }
 
+// Son render edilen Toplu Eşleştirme sonuçlarındaki candidate.id -> r eşlemesi
+// — satıra tıklanınca hangi aday/skor/rota detayının modalda açılacağını
+// bulmak için (event delegation, bkz. batchMatchResults click listener'ı).
+let lastBatchResultsByCandidateId = new Map();
+
 function renderBatchMatchResults(assignmentsByProject, unassigned, projects) {
   const totalAssigned = Array.from(assignmentsByProject.values()).reduce((sum, list) => sum + list.length, 0);
+
+  lastBatchResultsByCandidateId = new Map();
+  assignmentsByProject.forEach((list) => {
+    list.forEach((r) => lastBatchResultsByCandidateId.set(r.candidate.id, r));
+  });
 
   const projectSectionsHtml = projects
     .map((p) => {
@@ -1163,7 +1213,7 @@ function renderBatchMatchResults(assignmentsByProject, unassigned, projects) {
         ? list
             .map(
               (r) => `
-              <div class="flex items-center justify-between gap-2 py-1.5 border-b border-slate-50 last:border-0">
+              <div class="batch-candidate-row flex items-center justify-between gap-2 py-1.5 border-b border-slate-50 last:border-0 cursor-pointer hover:bg-slate-50 rounded-md px-1 -mx-1" data-candidate-id="${r.candidate.id}">
                 <div class="min-w-0">
                   <div class="text-sm font-medium text-slate-800 truncate">${r.candidate.fullName || "İsimsiz aday"}</div>
                   <div class="text-xs text-slate-400">${r.candidate.phoneRaw || "-"}</div>

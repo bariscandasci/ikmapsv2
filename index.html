@@ -445,8 +445,19 @@
   </div>
 </div>
 
+<!-- TOPLU EŞLEŞTİRME SONUÇLARINDA BİR ADAYA TIKLAYINCA AÇILAN PROFİL MODALI -->
+<div id="batchCandidateModal" class="hidden fixed inset-0 bg-black/40 z-[2500] flex items-center justify-center p-6">
+  <div class="bg-white rounded-xl shadow-xl w-full max-w-xl max-h-[85vh] flex flex-col">
+    <div class="flex items-center justify-between px-4 py-3 border-b border-slate-100 shrink-0">
+      <h2 class="text-sm font-bold text-slate-800">Aday Detayı</h2>
+      <button id="batchCandidateModalClose" class="text-slate-400 hover:text-slate-600 text-lg leading-none">&times;</button>
+    </div>
+    <div id="batchCandidateModalBody" class="flex-1 overflow-y-auto p-5"></div>
+  </div>
+</div>
+
 <script src="data.js?v=56"></script>
 <script src="app.js?v=58"></script>
-<script src="candidates.js?v=7"></script>
+<script src="candidates.js?v=8"></script>
 </body>
 </html>
