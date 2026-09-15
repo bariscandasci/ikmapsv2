@@ -1488,6 +1488,12 @@ modeButtons.forEach((btn) => {
     // seçim kutusunu (panel-project) kullanır.
     projectPanel.classList.toggle("hidden", currentMode === "origin-to-project");
     clearResults();
+    // "Proje -> Gerçek Adaylar" harita/sidebar yerine tam ekran ayrı bir
+    // görünümde açılır (candidates.js) — 209+ aday cramped bir listeye
+    // sığmıyor, aday detayı da ayrı bir panelde gösterilmesi gerekiyordu.
+    if (typeof toggleCandidateFullscreen === "function") {
+      toggleCandidateFullscreen(currentMode === "project-to-candidates");
+    }
   });
 });
 
@@ -2290,6 +2296,7 @@ addProjectForm.addEventListener("submit", async (e) => {
       transport: fd.get("transport").trim(),
       referral: fd.get("referral").trim(),
       gender: fd.get("gender"),
+      capacity: fd.get("capacity").trim(),
       urgent: false,
       active: true,
     };

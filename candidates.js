@@ -76,6 +76,18 @@ const CandidateStore = {
     } catch {
       this._mem = [];
     }
+    // Tek seferlik onarım: eski bir sürümde "Yaş" sütunu bazen doğum tarihi
+    // sütunuyla eşleşip Excel'in seri tarih sayısı (ör. 27312) olduğu gibi
+    // yaş olarak kaydedilmişti (bkz. deriveAge). Zaten diskte duran kayıtları
+    // burada, sayfa her yüklendiğinde sessizce onarır.
+    let repaired = false;
+    this._mem.forEach((c) => {
+      if (c.age != null && (c.age < 14 || c.age > 100)) {
+        c.age = repairImplausibleAgeValue(c.age);
+        repaired = true;
+      }
+    });
+    if (repaired) this._save();
     return this._mem;
   },
   _save() {
@@ -157,16 +169,86 @@ function cellAt(row, idx) {
   return String(row[idx] ?? "").trim();
 }
 
-/** Excel'in seri tarih sayısını ya da serbest metin bir tarihi ISO string'e çevirir; olmazsa null. */
+/**
+ * Excel'in seri tarih sayısını ya da serbest metin bir tarihi ISO string'e
+ * çevirir; olmazsa null. GG.AA.YYYY / GG/AA/YYYY / GG-AA-YYYY (Türkçe/Avrupa
+ * sırası — gün önce) formatı AÇIKÇA ayrıca destekleniyor, çünkü JS'in yerleşik
+ * Date ayrıştırıcısı "15.03.1990" gibi noktalı tarihleri hiç tanımıyor
+ * (Invalid Date), "15/03/1990" gibi eğik çizgili olanları ise ABD sırasıyla
+ * (AA/GG/YYYY) okumaya çalışıp gün>12 olduğunda sessizce yanlış/Invalid
+ * sonuç veriyor.
+ */
 function parseFlexibleDate(raw) {
   if (!raw) return null;
-  const asNum = Number(raw);
-  if (Number.isFinite(asNum) && asNum > 20000 && asNum < 60000) {
-    const epoch = Date.UTC(1899, 11, 30);
-    return new Date(epoch + asNum * 86400000).toISOString();
+  const str = String(raw).trim();
+
+  if (/^\d+$/.test(str)) {
+    const asNum = Number(str);
+    if (asNum > 20000 && asNum < 60000) {
+      const epoch = Date.UTC(1899, 11, 30);
+      return new Date(epoch + asNum * 86400000).toISOString();
+    }
   }
-  const d = new Date(raw);
+
+  const dmy = str.match(/^(\d{1,2})[./-](\d{1,2})[./-](\d{4})$/);
+  if (dmy) {
+    const [, dd, mm, yyyy] = dmy;
+    const d = new Date(Date.UTC(Number(yyyy), Number(mm) - 1, Number(dd)));
+    if (!isNaN(d.getTime())) return d.toISOString();
+    return null;
+  }
+
+  const d = new Date(str);
   return isNaN(d.getTime()) ? null : d.toISOString();
+}
+
+/** Diskte zaten duran, mantıksız bir yaş değerini (bkz. CandidateStore._load) onarmayı dener. */
+function repairImplausibleAgeValue(badAge) {
+  if (badAge > 1000) {
+    const epoch = Date.UTC(1899, 11, 30);
+    const birth = new Date(epoch + badAge * 86400000);
+    if (!isNaN(birth.getTime())) {
+      const age = ageFromBirthDateIso(birth.toISOString());
+      if (age != null && age >= 14 && age <= 100) return age;
+    }
+  }
+  return null; // onarılamadı — yanlış bir sayı göstermektense boş bırak
+}
+
+function ageFromBirthDateIso(iso) {
+  const birth = new Date(iso);
+  if (isNaN(birth.getTime())) return null;
+  const now = new Date();
+  let age = now.getFullYear() - birth.getFullYear();
+  const hadBirthdayThisYear = now.getMonth() > birth.getMonth() || (now.getMonth() === birth.getMonth() && now.getDate() >= birth.getDate());
+  if (!hadBirthdayThisYear) age -= 1;
+  return age;
+}
+
+/**
+ * "Yaş" olarak eşlenen sütun bazen doğrudan bir yaş sayısı değil, bir doğum
+ * tarihi olabilir (ör. kaynak Excel'de "Yaş" diye etiketlenmiş ama içinde
+ * "15.03.1990" ya da Excel'in kendi seri tarih sayısı — 27312 gibi — var).
+ * Önce makul bir yaş (14-100) olup olmadığına bakılır; değilse tarih olarak
+ * yorumlanıp yaşa çevrilir. İkisi de tutmazsa null (uydurma bir sayı
+ * göstermektense boş bırakmak daha doğru).
+ */
+function deriveAge(raw) {
+  if (!raw) return null;
+  const trimmed = String(raw).trim();
+  // SADECE dizinin tamamı rakamsa doğrudan yaş olarak kabul edilir — aksi
+  // halde parseInt("15.03.1990") gibi bir tarihin baştaki "15"ini sessizce
+  // (yanlışlıkla) geçerli bir yaşmış gibi kabul ederdi.
+  if (/^\d{1,3}$/.test(trimmed)) {
+    const asInt = parseInt(trimmed, 10);
+    if (asInt >= 14 && asInt <= 100) return asInt;
+  }
+  const iso = parseFlexibleDate(trimmed);
+  if (iso) {
+    const age = ageFromBirthDateIso(iso);
+    if (age != null && age >= 14 && age <= 100) return age;
+  }
+  return null;
 }
 
 function buildCandidateFromRow(row, mapping, uploadedAt) {
@@ -174,8 +256,7 @@ function buildCandidateFromRow(row, mapping, uploadedAt) {
   const phoneRaw = cellAt(row, mapping.phone);
   const phone = normalizePhone(phoneRaw);
   const addressText = cellAt(row, mapping.addressText);
-  const ageRaw = cellAt(row, mapping.age);
-  const ageNum = ageRaw ? parseInt(ageRaw, 10) : NaN;
+  const age = deriveAge(cellAt(row, mapping.age));
   const genderNorm = cellAt(row, mapping.gender).toLocaleLowerCase("tr");
   const gender = genderNorm.startsWith("k") ? "Kadın" : genderNorm.startsWith("e") ? "Erkek" : null;
   const sectorExperience = cellAt(row, mapping.sectorExperience)
@@ -199,7 +280,7 @@ function buildCandidateFromRow(row, mapping, uploadedAt) {
     neighborhoodId: null,
     coords: null,
     coordsSource: null,
-    age: Number.isFinite(ageNum) ? ageNum : null,
+    age,
     gender,
     sectorExperience,
     certificates,
@@ -274,6 +355,25 @@ async function resolveCandidateCoords(candidate) {
 const CANDIDATE_SCORE_WEIGHTS = { proximity: 40, transfers: 15, experience: 25, ageFit: 20 };
 const CANDIDATE_SCORE_LABELS = { proximity: "Yakınlık", transfers: "Aktarma", experience: "Deneyim", ageFit: "Yaş uygunluğu" };
 
+// ---------------------------------------------------------------------------
+// AI YARDIMCI KATMANI — üç özellik de (eşleşme gerekçesi, doğal dil filtre,
+// sütun eşleştirme önerisi) tek genel amaçlı Apps Script ucunu (action:
+// "aiComplete", bkz. Code.gs) kullanır. API anahtarı sadece Apps Script
+// tarafında tutulur, istemciye hiç gelmez.
+// ---------------------------------------------------------------------------
+
+async function callAI(system, prompt, maxTokens) {
+  const data = await postToSheet({ action: "aiComplete", system, prompt, maxTokens: maxTokens || 400 });
+  return data.text || "";
+}
+
+/** Model çıktısında JSON'dan önce/sonra açıklama metni gelse bile ilk {...} bloğunu ayıklar. */
+function extractJsonBlock(text) {
+  const match = String(text || "").match(/\{[\s\S]*\}/);
+  if (!match) throw new Error("AI geçerli bir JSON döndürmedi");
+  return JSON.parse(match[0]);
+}
+
 // Proje bazlı bir yaş aralığı tanımlanmamışsa (bkz. AÇIK KARAR: proje
 // şemasında henüz ageRange alanı yok) bu genel varsayım kullanılır.
 const CANDIDATE_DEFAULT_AGE_RANGE = { min: 22, max: 45 };
@@ -326,7 +426,7 @@ function candidateHardFilterReasons(candidate, project) {
 async function scoreCandidateForProject(candidate, project) {
   const coords = await resolveCandidateCoords(candidate);
   if (!coords) {
-    return { candidate, estimate: null, breakdown: null, total: 0, eliminated: true, reasons: ["Konum belirlenemedi (adres/ilçe eşleşmedi)"] };
+    return { candidate, project, estimate: null, breakdown: null, total: 0, eliminated: true, reasons: ["Konum belirlenemedi (adres/ilçe eşleşmedi)"] };
   }
 
   const reasons = candidateHardFilterReasons(candidate, project);
@@ -342,7 +442,7 @@ async function scoreCandidateForProject(candidate, project) {
   };
   const total = Object.values(breakdown).reduce((a, b) => a + b, 0);
 
-  return { candidate, estimate, breakdown, total, eliminated: reasons.length > 0, reasons };
+  return { candidate, project, estimate, breakdown, total, eliminated: reasons.length > 0, reasons };
 }
 
 /** projectId sabit taraf olduğu için getTransitEstimate fixedSide="dest" ile çağrılır (Dijkstra önbelleği isabet eder, bkz. app.js). */
@@ -359,8 +459,12 @@ async function rankCandidatesForProject(projectId) {
 }
 
 // ---------------------------------------------------------------------------
-// 5) UI — "Proje -> Gerçek Adaylar" sonuç listesi
+// 5) UI — "Proje -> Gerçek Adaylar" TAM EKRAN görünümü
 // ---------------------------------------------------------------------------
+// 209+ adaylık gerçek listelerde cramped bir sidebar listesi yetersiz kaldığı
+// için bu mod harita/sidebar'ı gizleyip tam ekran, iki panelli bir görünüm
+// açar: solda aranabilir aday listesi, sağda seçili adayın tam detayı
+// (puan dökümü + gerçek rota + tüm Excel alanları).
 
 const CANDIDATE_STALE_DAYS = 30;
 
@@ -371,84 +475,452 @@ function daysSince(isoDateStr) {
   return Math.floor((Date.now() - d.getTime()) / 86400000);
 }
 
-function buildCandidateResultCard(r) {
-  const card = document.createElement("div");
-  const freshnessBasis = r.candidate.appliedAt || r.candidate.uploadedAt;
-  const staleDays = daysSince(freshnessBasis);
-  const isStale = staleDays !== null && staleDays > CANDIDATE_STALE_DAYS;
-  card.className = `candidate-card ${r.eliminated ? "candidate-card-eliminated" : ""}`;
-
-  const breakdownHtml = r.breakdown
-    ? Object.entries(r.breakdown)
-        .map(([k, v]) => `<span class="candidate-score-chip">${CANDIDATE_SCORE_LABELS[k]}: ${v}</span>`)
-        .join("")
-    : "";
-
-  const sourceLabel = r.candidate.source ? ` · ${r.candidate.source}` : "";
-  const staleHtml = isStale
-    ? `<div class="text-[10px] text-amber-600 font-semibold mt-1.5">⚠️ ${staleDays} gündür güncellenmedi — İK, adayla tekrar teyit etmeli</div>`
-    : "";
-
-  card.innerHTML = `
-    <div class="flex items-start justify-between gap-2">
-      <div class="min-w-0">
-        <div class="font-semibold text-slate-800 truncate">${r.candidate.fullName || "İsimsiz aday"}</div>
-        <div class="text-xs text-slate-500">${r.candidate.phoneRaw || "-"}${sourceLabel}</div>
-      </div>
-      ${
-        r.eliminated
-          ? `<span class="shrink-0 text-[10px] font-bold px-2 py-1 rounded-full bg-slate-200 text-slate-500 whitespace-nowrap">ELENDİ</span>`
-          : `<span class="shrink-0 text-sm font-bold px-2 py-1 rounded-full bg-indigo-100 text-indigo-700 whitespace-nowrap">${r.total} p</span>`
-      }
-    </div>
-    ${
-      r.eliminated
-        ? `<div class="text-[11px] text-red-600 mt-1.5">${r.reasons.join(", ")}</div>`
-        : `<div class="flex flex-wrap gap-1 mt-1.5">${breakdownHtml}</div>
-           <div class="text-[11px] text-slate-500 mt-1.5">${r.estimate.durationMin} dk · ${r.estimate.transfers} aktarma${r.estimate.verified ? "" : " · TAHMİNİ"}</div>`
-    }
-    ${staleHtml}
-  `;
-  return card;
+/**
+ * Bir adayın "yılı" — başvuru tarihi varsa ondan, yoksa sisteme yüklendiği
+ * tarihten türetilir. Ayrı bir alan olarak SAKLANMIYOR (appliedAt/uploadedAt
+ * zaten kalıcı) — her ihtiyaç duyulduğunda buradan hesaplanır, böylece iki
+ * kaynak birbirinden asla sapmaz.
+ */
+function candidateYear(c) {
+  const iso = c.appliedAt || c.uploadedAt;
+  if (!iso) return null;
+  const d = new Date(iso);
+  return isNaN(d.getTime()) ? null : d.getFullYear();
 }
+
+const mainLayout = document.getElementById("mainLayout");
+const candidateFullscreenView = document.getElementById("candidateFullscreenView");
+const candidateFsBackBtn = document.getElementById("candidateFsBackBtn");
+const candidateFsProjectSelect = document.getElementById("candidateFsProjectSelect");
+const candidateFsSearch = document.getElementById("candidateFsSearch");
+const candidateFsYearFilter = document.getElementById("candidateFsYearFilter");
+const candidateFsAiFilterBtn = document.getElementById("candidateFsAiFilterBtn");
+const candidateFsAiFilterStatus = document.getElementById("candidateFsAiFilterStatus");
+const candidateFsList = document.getElementById("candidateFsList");
+const candidateFsDetail = document.getElementById("candidateFsDetail");
+const candidateFsCount = document.getElementById("candidateFsCount");
+
+let lastCandidateFsResults = [];
+let lastCandidateFsProjectId = null;
+let selectedCandidateId = null;
+let activeAiFilter = null; // interpretCandidateQueryWithAI() çıktısı | null
+
+/** app.js'teki rebuildProjectSelect() ile aynı grup/sırlama mantığı — ayrı select olduğu için tekrarlanıyor. */
+function populateCandidateFsProjectSelect() {
+  const previouslySelected = candidateFsProjectSelect.value;
+  candidateFsProjectSelect.innerHTML = '<option value="">Seçiniz…</option>';
+  const bySector = {};
+  activeProjects().forEach((p) => (bySector[p.sector] = bySector[p.sector] || []).push(p));
+  Object.keys(bySector)
+    .sort()
+    .forEach((sector) => {
+      const optGroup = document.createElement("optgroup");
+      optGroup.label = sector;
+      bySector[sector]
+        .slice()
+        .sort((a, b) => a.name.localeCompare(b.name, "tr"))
+        .forEach((p) => {
+          const opt = document.createElement("option");
+          opt.value = p.id;
+          opt.textContent = `${p.name} — ${p.address}`;
+          optGroup.appendChild(opt);
+        });
+      candidateFsProjectSelect.appendChild(optGroup);
+    });
+  if (previouslySelected) candidateFsProjectSelect.value = previouslySelected;
+}
+
+/** Tam ekran görünümü açar/kapatır — app.js'teki mod butonu handler'ından çağrılır. */
+function toggleCandidateFullscreen(show) {
+  candidateFullscreenView.classList.toggle("hidden", !show);
+  mainLayout.classList.toggle("hidden", show);
+  if (!show) return;
+
+  populateCandidateFsProjectSelect();
+  if (projectSelect.value) {
+    candidateFsProjectSelect.value = projectSelect.value;
+    renderCandidateFsResults(projectSelect.value);
+  } else {
+    candidateFsList.innerHTML = `<div class="text-xs text-slate-400 px-2 py-4">Üstten bir proje seçin.</div>`;
+    candidateFsCount.textContent = "";
+    candidateFsDetail.innerHTML = `<div class="text-sm text-slate-400">Detayları görmek için soldan bir aday seçin.</div>`;
+  }
+}
+
+candidateFsBackBtn.addEventListener("click", () => {
+  document.querySelector('.mode-btn[data-mode="origin-to-project"]').click();
+});
+
+candidateFsProjectSelect.addEventListener("change", () => {
+  projectSelect.value = candidateFsProjectSelect.value; // ana (gizli) select ile senkron kalsın
+  if (candidateFsProjectSelect.value) {
+    renderCandidateFsResults(candidateFsProjectSelect.value);
+  } else {
+    candidateFsList.innerHTML = "";
+    candidateFsCount.textContent = "";
+    candidateFsDetail.innerHTML = `<div class="text-sm text-slate-400">Detayları görmek için soldan bir aday seçin.</div>`;
+  }
+});
 
 /**
  * currentMode/runSearch bunu app.js'ten çağırır (bkz. app.js runSearch()).
  * Konum çözme (geocode) asenkron olabileceği için bu fonksiyon da asenkron —
  * "puanlanıyor" durumu anında gösterilir, sonuçlar gelince yerini alır.
+ * İsmi "renderProjectToCandidates" — app.js'in runSearch() fonksiyonu bu
+ * ismi çağırıyor, değiştirmeye gerek yok.
  */
 async function renderProjectToCandidates(projectId) {
+  toggleCandidateFullscreen(true);
+  await renderCandidateFsResults(projectId);
+}
+
+async function renderCandidateFsResults(projectId) {
+  lastCandidateFsProjectId = projectId;
+  selectedCandidateId = null;
+  activeAiFilter = null;
+  candidateFsAiFilterStatus.innerHTML = "";
   const project = ANKARA_DATA.projects.find((p) => p.id === projectId);
-  if (!project) return clearResults();
-
-  routesLayer.clearLayers();
-  resetDistrictMarkers();
-  routeDetail.classList.add("hidden");
-  nearbyLinesPanel.classList.add("hidden");
-
-  const allCandidates = CandidateStore.all();
-  resultsHeading.textContent = `${project.name} → Gerçek Adaylar (${allCandidates.length})`;
-  emptyState.classList.toggle("hidden", allCandidates.length > 0);
-  if (!allCandidates.length) {
-    resultsList.innerHTML = "";
-    emptyState.textContent = "Henüz hiç aday yüklenmedi — üstteki \"📋 Aday Yükle\" ile bir Excel dosyası içe aktarın.";
+  if (!project) {
+    candidateFsList.innerHTML = "";
+    candidateFsCount.textContent = "";
     return;
   }
-  emptyState.textContent = "Sonuçları görmek için yukarıdan bir seçim yapın.";
-  resultsList.innerHTML = `<div class="text-xs text-slate-400 px-1 py-4">Adaylar puanlanıyor…</div>`;
+
+  const allCandidates = CandidateStore.all();
+  if (!allCandidates.length) {
+    candidateFsList.innerHTML = `<div class="text-xs text-slate-400 px-2 py-4 leading-snug">Henüz hiç aday yüklenmedi — üstteki "📋 Aday Yükle" ile bir Excel dosyası içe aktarın.</div>`;
+    candidateFsCount.textContent = "0 aday";
+    candidateFsDetail.innerHTML = `<div class="text-sm text-slate-400">Detayları görmek için soldan bir aday seçin.</div>`;
+    return;
+  }
+
+  candidateFsCount.textContent = "Puanlanıyor…";
+  candidateFsList.innerHTML = `<div class="text-xs text-slate-400 px-2 py-4">Adaylar puanlanıyor…</div>`;
+  candidateFsDetail.innerHTML = `<div class="text-sm text-slate-400">Detayları görmek için soldan bir aday seçin.</div>`;
 
   const results = await rankCandidatesForProject(projectId);
-  // Puanlama sürerken kullanıcı başka bir seçime geçmiş olabilir — o zaman bu eski sonucu ekrana basma.
-  if (currentMode !== "project-to-candidates" || projectSelect.value !== projectId) return;
+  // Puanlama sürerken kullanıcı başka bir projeye geçmiş olabilir — o zaman bu eski sonucu ekrana basma.
+  if (lastCandidateFsProjectId !== projectId) return;
 
-  resultsList.innerHTML = "";
-  results.forEach((r) => resultsList.appendChild(buildCandidateResultCard(r)));
+  lastCandidateFsResults = results;
+  const eliminatedCount = results.filter((r) => r.eliminated).length;
+  candidateFsCount.textContent = `${results.length} aday (${results.length - eliminatedCount} uygun)`;
+  populateCandidateFsYearFilter();
+  renderCandidateFsList();
+}
 
-  map.setView([project.coords ? project.coords.lat : project.lat, project.coords ? project.coords.lng : project.lng], 11, {
-    animate: true,
-    duration: 0.8,
+/** Sonuçlardaki adaylardan (appliedAt/uploadedAt bazlı) mevcut yılları çıkarıp dropdown'u doldurur. */
+function populateCandidateFsYearFilter() {
+  const previouslySelected = candidateFsYearFilter.value;
+  const years = Array.from(
+    new Set(lastCandidateFsResults.map((r) => candidateYear(r.candidate)).filter((y) => y != null))
+  ).sort((a, b) => b - a);
+  candidateFsYearFilter.innerHTML =
+    '<option value="">Tüm yıllar</option>' + years.map((y) => `<option value="${y}">${y}</option>`).join("");
+  if (previouslySelected && years.some((y) => String(y) === previouslySelected)) {
+    candidateFsYearFilter.value = previouslySelected;
+  }
+}
+
+function renderCandidateFsList() {
+  let filtered;
+  if (activeAiFilter) {
+    filtered = applyAiCandidateFilter(lastCandidateFsResults, activeAiFilter);
+  } else {
+    const query = candidateFsSearch.value.trim().toLocaleLowerCase("tr");
+    const queryDigits = query.replace(/\D/g, "");
+    filtered = query
+      ? lastCandidateFsResults.filter((r) => {
+          const name = (r.candidate.fullName || "").toLocaleLowerCase("tr");
+          const phone = r.candidate.phone || "";
+          return name.includes(query) || (queryDigits && phone.includes(queryDigits));
+        })
+      : lastCandidateFsResults;
+  }
+
+  const yearFilter = candidateFsYearFilter.value;
+  if (yearFilter) {
+    filtered = filtered.filter((r) => String(candidateYear(r.candidate)) === yearFilter);
+  }
+
+  candidateFsList.innerHTML = "";
+  if (!filtered.length) {
+    candidateFsList.innerHTML = `<div class="text-xs text-slate-400 px-2 py-4">Sonuç yok.</div>`;
+    return;
+  }
+  filtered.forEach((r) => candidateFsList.appendChild(buildCandidateFsRow(r)));
+}
+
+candidateFsSearch.addEventListener("input", renderCandidateFsList);
+candidateFsYearFilter.addEventListener("change", renderCandidateFsList);
+
+// ---------------------------------------------------------------------------
+// AI DOĞAL DİL FİLTRE — İK, arama kutusuna "Ostim'e yakın, temizlik
+// deneyimli, 30 yaş altı kadın adaylar" gibi serbest metin yazıp "✨ AI
+// Filtre"ye basınca; AI bunu küçük bir yapılandırılmış filtreye çevirir,
+// filtre mevcut (zaten hesaplanmış) sonuçlar üzerinde İSTEMCİ TARAFINDA
+// uygulanır — skorlama motoruna dokunulmaz.
+// ---------------------------------------------------------------------------
+
+async function interpretCandidateQueryWithAI(text) {
+  const system =
+    "Sen İK arama sorgularını yapılandırılmış filtreye çeviren bir asistansın. SADECE geçerli JSON döndür, başka hiçbir metin yazma. " +
+    'Şema: {"gender": "Kadın"|"Erkek"|null, "sectorKeyword": string|null, "minAge": number|null, "maxAge": number|null, ' +
+    '"maxDurationMin": number|null, "maxTransfers": number|null, "onlyEligible": boolean}. ' +
+    'Sorguda geçmeyen alanlar için null kullan (onlyEligible belirtilmemişse false). "yakın" gibi göreli ifadeler için makul bir dakika değeri tahmin et (ör. ~30dk).';
+  const raw = await callAI(system, `Sorgu: "${text}"`, 200);
+  const parsed = extractJsonBlock(raw);
+  return {
+    gender: parsed.gender || null,
+    sectorKeyword: parsed.sectorKeyword || null,
+    minAge: parsed.minAge != null ? Number(parsed.minAge) : null,
+    maxAge: parsed.maxAge != null ? Number(parsed.maxAge) : null,
+    maxDurationMin: parsed.maxDurationMin != null ? Number(parsed.maxDurationMin) : null,
+    maxTransfers: parsed.maxTransfers != null ? Number(parsed.maxTransfers) : null,
+    onlyEligible: !!parsed.onlyEligible,
+  };
+}
+
+function applyAiCandidateFilter(results, f) {
+  return results.filter((r) => {
+    const c = r.candidate;
+    if (f.onlyEligible && r.eliminated) return false;
+    // Alan Excel'de boş bırakılmışsa (bilinmiyor), adayı bu kriterden ELEME —
+    // eksik veri adayın aleyhine kullanılmaz, sadece GERÇEKTEN uyuşmazlık
+    // varsa filtrelenir. (Önceki sürüm boş alanları da "uymuyor" sayıyordu,
+    // bu da çoğu adayın haksız yere elenmesine — filtrenin gereğinden fazla
+    // dar olmasına — yol açıyordu.)
+    if (f.gender && c.gender && c.gender !== f.gender) return false;
+    if (f.sectorKeyword && (c.sectorExperience || []).length) {
+      const hay = c.sectorExperience.join(" ").toLocaleLowerCase("tr");
+      if (!hay.includes(f.sectorKeyword.toLocaleLowerCase("tr"))) return false;
+    }
+    if (f.minAge != null && c.age != null && c.age < f.minAge) return false;
+    if (f.maxAge != null && c.age != null && c.age > f.maxAge) return false;
+    if (f.maxDurationMin != null && r.estimate && r.estimate.durationMin > f.maxDurationMin) return false;
+    if (f.maxTransfers != null && r.estimate && r.estimate.transfers > f.maxTransfers) return false;
+    return true;
   });
 }
+
+function renderAiFilterStatus(originalText) {
+  if (!activeAiFilter) {
+    candidateFsAiFilterStatus.innerHTML = "";
+    return;
+  }
+  candidateFsAiFilterStatus.innerHTML = `
+    <span class="inline-flex items-center gap-1.5 text-xs bg-indigo-50 text-indigo-700 border border-indigo-200 rounded-full px-2.5 py-1">
+      🔎 "${originalText}"
+      <button type="button" id="candidateFsAiFilterClear" class="font-bold hover:text-indigo-900 leading-none">&times;</button>
+    </span>`;
+  document.getElementById("candidateFsAiFilterClear").addEventListener("click", () => {
+    activeAiFilter = null;
+    candidateFsAiFilterStatus.innerHTML = "";
+    renderCandidateFsList();
+  });
+}
+
+candidateFsAiFilterBtn.addEventListener("click", async () => {
+  const text = candidateFsSearch.value.trim();
+  if (!text) return;
+  candidateFsAiFilterBtn.disabled = true;
+  candidateFsAiFilterBtn.textContent = "✨ …";
+  try {
+    activeAiFilter = await interpretCandidateQueryWithAI(text);
+    candidateFsSearch.value = "";
+    renderAiFilterStatus(text);
+    renderCandidateFsList();
+  } catch (err) {
+    candidateFsAiFilterStatus.innerHTML = `<span class="text-xs text-red-600">AI filtre anlaşılamadı: ${err.message}</span>`;
+  } finally {
+    candidateFsAiFilterBtn.disabled = false;
+    candidateFsAiFilterBtn.textContent = "✨ AI Filtre";
+  }
+});
+
+function buildCandidateFsRow(r) {
+  const row = document.createElement("button");
+  row.type = "button";
+  const isSelected = r.candidate.id === selectedCandidateId;
+  row.className = `candidate-card ${isSelected ? "candidate-card-selected" : ""} ${r.eliminated ? "candidate-card-eliminated" : ""}`;
+  const year = candidateYear(r.candidate);
+  row.innerHTML = `
+    <div class="flex items-center justify-between gap-2">
+      <div class="min-w-0">
+        <div class="text-sm font-semibold text-slate-800 truncate">${r.candidate.fullName || "İsimsiz aday"}</div>
+        <div class="text-xs text-slate-500">${r.candidate.phoneRaw || "-"}${year ? ` · ${year}` : ""}</div>
+      </div>
+      ${
+        r.eliminated
+          ? `<span class="shrink-0 text-[10px] font-bold px-1.5 py-0.5 rounded bg-slate-200 text-slate-500 whitespace-nowrap">ELENDİ</span>`
+          : `<span class="shrink-0 text-xs font-bold px-2 py-0.5 rounded-full bg-indigo-100 text-indigo-700 whitespace-nowrap">${r.total} p</span>`
+      }
+    </div>`;
+  row.addEventListener("click", () => {
+    selectedCandidateId = r.candidate.id;
+    renderCandidateFsList();
+    renderCandidateDetail(r);
+  });
+  return row;
+}
+
+/**
+ * Bir aday sonucundan ({candidate, estimate, breakdown, total, eliminated,
+ * reasons} — scoreCandidateForProject çıktısı) detay panelinin HTML'ini
+ * üretir. Hem "Proje -> Gerçek Adaylar" tam ekranındaki sağ panelde hem de
+ * Toplu Eşleştirme sonuçlarındaki aday satırına tıklanınca açılan modalda
+ * kullanılır — yorumlar dahil aynı görünüm, TEKRAR YAZILMAZ.
+ */
+function buildCandidateDetailHtml(r) {
+  const c = r.candidate;
+  const freshnessBasis = c.appliedAt || c.uploadedAt;
+  const staleDays = daysSince(freshnessBasis);
+  const isStale = staleDays !== null && staleDays > CANDIDATE_STALE_DAYS;
+
+  const headerHtml = `
+    <div class="flex items-start justify-between gap-3 mb-4">
+      <div>
+        <div class="text-lg font-bold text-slate-800">${c.fullName || "İsimsiz aday"}</div>
+        ${isStale ? `<div class="text-xs text-amber-600 font-semibold mt-0.5">⚠️ ${staleDays} gündür güncellenmedi — İK, adayla tekrar teyit etmeli</div>` : ""}
+      </div>
+      ${
+        r.eliminated
+          ? `<span class="shrink-0 text-xs font-bold px-3 py-1.5 rounded-full bg-slate-200 text-slate-500">ELENDİ</span>`
+          : `<span class="shrink-0 text-xl font-bold px-3 py-1.5 rounded-full bg-indigo-100 text-indigo-700">${r.total} puan</span>`
+      }
+    </div>`;
+
+  const eliminationHtml = r.eliminated
+    ? `<div class="mb-5 p-3 rounded-lg bg-red-50 border border-red-200 text-sm text-red-700">${r.reasons.join(", ")}</div>`
+    : "";
+
+  const scoreBarsHtml = r.breakdown
+    ? `<div class="mb-5 space-y-2.5">
+        ${Object.entries(r.breakdown)
+          .map(([k, v]) => {
+            const max = CANDIDATE_SCORE_WEIGHTS[k];
+            const pct = Math.round((v / max) * 100);
+            return `
+            <div>
+              <div class="flex justify-between text-xs text-slate-500 mb-1"><span>${CANDIDATE_SCORE_LABELS[k]}</span><span>${v}/${max}</span></div>
+              <div class="candidate-score-bar-track"><div class="candidate-score-bar-fill" style="width:${pct}%"></div></div>
+            </div>`;
+          })
+          .join("")}
+      </div>`
+    : "";
+
+  const aiExplainHtml = !r.eliminated && r.breakdown
+    ? `<div class="mb-5">
+        <button type="button" class="ai-explain-btn text-xs font-semibold text-indigo-600 hover:text-indigo-800">✨ AI ile gerekçelendir</button>
+        <div class="ai-explain-result hidden mt-2 text-sm text-slate-600 leading-snug bg-indigo-50 border border-indigo-100 rounded-lg p-3"></div>
+      </div>`
+    : "";
+
+  const routeHtml =
+    !r.eliminated && r.estimate
+      ? `<div class="mb-5">
+          <div class="text-xs font-semibold text-slate-500 uppercase tracking-wide mb-2">Projeye Rota · ${r.estimate.durationMin} dk · ${r.estimate.transfers} aktarma${r.estimate.verified ? "" : " · TAHMİNİ"}</div>
+          <div class="border border-slate-200 rounded-lg p-3">${renderRouteSteps(r.estimate.steps)}</div>
+        </div>`
+      : "";
+
+  const infoRows = [
+    ["Telefon", c.phoneRaw || "-"],
+    ["Adres / İlçe", c.addressText || "-"],
+    ["Yaş", c.age != null ? c.age : "-"],
+    ["Cinsiyet", c.gender || "-"],
+    ["Sektör Deneyimi", (c.sectorExperience || []).join(", ") || "-"],
+    ["Sertifika / Belge", (c.certificates || []).join(", ") || "-"],
+    ["Kaynak", (c.mergedSources || []).join(", ") || c.source || "-"],
+    ["Yıl", candidateYear(c) || "-"],
+    ["Başvuru Tarihi", c.appliedAt ? new Date(c.appliedAt).toLocaleDateString("tr-TR") : "-"],
+    ["Sisteme Yüklenme", c.uploadedAt ? new Date(c.uploadedAt).toLocaleDateString("tr-TR") : "-"],
+  ];
+  const infoHtml = `<div class="border-t border-slate-100 pt-3">
+    ${infoRows
+      .map(
+        ([label, value]) =>
+          `<div class="flex justify-between gap-3 py-1.5 border-b border-slate-100 text-sm">
+            <span class="text-slate-500">${label}</span><span class="font-medium text-slate-800 text-right">${value}</span>
+          </div>`
+      )
+      .join("")}
+  </div>`;
+
+  const commentsHtml = `
+    <div class="mt-5 pt-4 border-t border-slate-200">
+      <div class="text-xs font-semibold text-slate-500 uppercase tracking-wide mb-2">Yorumlar</div>
+      <div id="candidateCommentsSection"></div>
+    </div>`;
+
+  return `<div class="max-w-xl">${headerHtml}${eliminationHtml}${scoreBarsHtml}${aiExplainHtml}${routeHtml}${infoHtml}${commentsHtml}</div>`;
+}
+
+/** Aday-proje eşleşmesini İK'nın anlayacağı, kısa Türkçe bir gerekçeye çevirir. */
+async function explainMatchWithAI(r) {
+  const c = r.candidate;
+  const p = r.project;
+  const system =
+    "Sen bir İK asistanısın. Sana verilen aday-proje eşleşme verisini İK çalışanına 2-3 kısa cümleyle, sade ve resmi bir Türkçe ile açıkla. " +
+    "Sayıları olduğu gibi tekrar etme, ne anlama geldiklerini yorumla. Sadece verilen bilgileri kullan, hiçbir şey uydurma.";
+  const prompt = [
+    `Aday: ${c.fullName || "İsimsiz"}, ${c.age != null ? c.age + " yaşında" : "yaşı bilinmiyor"}, ${c.gender || "cinsiyet belirtilmemiş"}.`,
+    `Sektör deneyimi: ${(c.sectorExperience || []).join(", ") || "belirtilmemiş"}.`,
+    `Proje: ${p.name} (${p.sector}), ${p.address}. Vardiya: ${p.shift || "-"}. Cinsiyet şartı: ${p.gender || "yok"}.`,
+    r.estimate ? `Ulaşım: ${r.estimate.durationMin} dk, ${r.estimate.transfers} aktarma${r.estimate.verified ? "" : " (tahmini)"}.` : "Ulaşım hesaplanamadı.",
+    `Puan dökümü (100 üzerinden): Yakınlık ${r.breakdown.proximity}/40, Aktarma ${r.breakdown.transfers}/15, Deneyim ${r.breakdown.experience}/25, Yaş uygunluğu ${r.breakdown.ageFit}/20. Toplam: ${r.total}.`,
+    "Bu adayın bu proje için neden uygun olduğunu (veya sınırlı uygun olduğunu) İK çalışanına kısaca açıkla.",
+  ].join("\n");
+  return callAI(system, prompt, 220);
+}
+
+/** buildCandidateDetailHtml'in ürettiği "✨ AI ile gerekçelendir" butonunu container içinde bulup bağlar. */
+function wireAiExplainButton(container, r) {
+  const btn = container.querySelector(".ai-explain-btn");
+  if (!btn) return;
+  const box = container.querySelector(".ai-explain-result");
+  btn.addEventListener("click", async () => {
+    btn.disabled = true;
+    btn.textContent = "✨ Oluşturuluyor…";
+    box.classList.remove("hidden");
+    box.textContent = "";
+    try {
+      box.textContent = await explainMatchWithAI(r);
+    } catch (err) {
+      box.textContent = "AI gerekçesi alınamadı: " + err.message;
+    } finally {
+      btn.disabled = false;
+      btn.textContent = "✨ AI ile gerekçelendir";
+    }
+  });
+}
+
+function renderCandidateDetail(r) {
+  candidateFsDetail.innerHTML = buildCandidateDetailHtml(r);
+  wireAiExplainButton(candidateFsDetail, r);
+  renderCommentsSection(r.candidate.id, r.candidate.fullName);
+}
+
+const batchCandidateModal = document.getElementById("batchCandidateModal");
+const batchCandidateModalBody = document.getElementById("batchCandidateModalBody");
+const batchCandidateModalClose = document.getElementById("batchCandidateModalClose");
+
+function openBatchCandidateModal(r) {
+  batchCandidateModalBody.innerHTML = buildCandidateDetailHtml(r);
+  wireAiExplainButton(batchCandidateModalBody, r);
+  batchCandidateModal.classList.remove("hidden");
+  selectedCandidateId = r.candidate.id; // renderCommentsSection'ın "hâlâ güncel mi" kontrolü için
+  renderCommentsSection(r.candidate.id, r.candidate.fullName);
+}
+function closeBatchCandidateModal() {
+  batchCandidateModal.classList.add("hidden");
+  batchCandidateModalBody.innerHTML = "";
+}
+batchCandidateModalClose.addEventListener("click", closeBatchCandidateModal);
+batchCandidateModal.addEventListener("click", (e) => {
+  if (e.target === batchCandidateModal) closeBatchCandidateModal();
+});
 
 // ---------------------------------------------------------------------------
 // 6) UI — Excel yükleme + sütun eşleme modalı
@@ -463,6 +935,7 @@ const candidateMappingArea = document.getElementById("candidateMappingArea");
 const candidateMappingRows = document.getElementById("candidateMappingRows");
 const candidateUploadStatus = document.getElementById("candidateUploadStatus");
 const candidateImportBtn = document.getElementById("candidateImportBtn");
+const candidateAiMapBtn = document.getElementById("candidateAiMapBtn");
 const candidatePoolCount = document.getElementById("candidatePoolCount");
 const candidateClearAllBtn = document.getElementById("candidateClearAllBtn");
 
@@ -551,6 +1024,47 @@ function renderCandidateMappingUI(headers) {
   candidateMappingArea.classList.remove("hidden");
 }
 
+/**
+ * Excel başlıklarını CANDIDATE_FIELDS'e karşı AI'a eşleştirtir — özellikle
+ * guessColumnForField'ın sabit anahtar kelime listesinin (bkz.
+ * CANDIDATE_FIELD_KEYWORDS) yakalayamadığı yazım hatalı/alışılmadık
+ * başlıklarda (farklı İK kaynaklarından gelen düzensiz Excel'ler) devreye
+ * girer. Öneri sadece <select>'lerin seçili değerini değiştirir, kullanıcı
+ * onaylamadan (İçe Aktar'a basmadan) hiçbir şey kaydedilmez.
+ */
+async function suggestMappingWithAI(headers) {
+  const system =
+    "Sen bir Excel sütun eşleştirme asistanısın. Verilen alan listesini, verilen sütun başlıklarıyla eşleştir. " +
+    "SADECE geçerli JSON döndür, başka hiçbir metin yazma. Şema: her fieldKey için değeri en uygun sütun indexi " +
+    "(0 tabanlı) olan, uygun sütun yoksa -1 olan bir obje.";
+  const fieldsDesc = CANDIDATE_FIELDS.map((f) => `${f.key}: ${f.label}`).join("\n");
+  const headersDesc = headers.map((h, i) => `${i}: ${h || "(boş başlık)"}`).join("\n");
+  const prompt = `Alanlar:\n${fieldsDesc}\n\nExcel sütunları:\n${headersDesc}\n\nHer alan için en uygun sütun indexini ver.`;
+  const raw = await callAI(system, prompt, 300);
+  return extractJsonBlock(raw);
+}
+
+candidateAiMapBtn.addEventListener("click", async () => {
+  if (!pendingImport) return;
+  candidateAiMapBtn.disabled = true;
+  candidateAiMapBtn.textContent = "✨ …";
+  try {
+    const mapping = await suggestMappingWithAI(pendingImport.headers);
+    candidateMappingRows.querySelectorAll(".candidate-map-select").forEach((sel) => {
+      const idx = Number(mapping[sel.dataset.field]);
+      if (Number.isInteger(idx) && idx >= -1 && idx < pendingImport.headers.length) {
+        sel.value = String(idx);
+      }
+    });
+    candidateUploadStatus.textContent = 'AI önerisi uygulandı — kontrol edip "İçe Aktar"a basın.';
+  } catch (err) {
+    candidateUploadStatus.textContent = "AI eşleştirme başarısız: " + err.message;
+  } finally {
+    candidateAiMapBtn.disabled = false;
+    candidateAiMapBtn.textContent = "✨ AI ile Eşleştir";
+  }
+});
+
 candidateImportBtn.addEventListener("click", () => {
   if (!pendingImport) return;
   const selects = candidateMappingRows.querySelectorAll(".candidate-map-select");
@@ -578,3 +1092,403 @@ candidateImportBtn.addEventListener("click", () => {
 
   if (currentMode === "project-to-candidates" && projectSelect.value) runSearch();
 });
+
+// ---------------------------------------------------------------------------
+// 7) ADAY YORUMLARI — ekip içi paylaşımlı notlar (Google Apps Script + Sheet)
+// ---------------------------------------------------------------------------
+// Yorumlar telefon bazlı candidate.id'ye göre saklanır — bu sayede aday
+// listesinin kendisi paylaşımlı olmasa bile (bkz. dosya başındaki NOT), aynı
+// telefonla farklı bilgisayarlarda içe aktarılan bir aday üzerindeki yorumlar
+// herkese görünür (aynı ID'ye düşerler).
+//
+// Bu ayrı, kendi bağımsız Google Sheet'ine yazan bir Apps Script Web App'i
+// kullanır — projelerin kaydedildiği SHEET_API_URL'den TAMAMEN AYRI. Kontrat:
+//   - POST {action:"addComment", comment:{candidateId, candidateName, author, text, createdAt}}
+//     -> {ok:true} döner, "Comments" sayfasına (yoksa oluşturularak) satır ekler.
+//   - GET ?action=getComments&candidateId=... -> o candidateId'ye ait yorumları
+//     [{candidateId, candidateName, author, text, createdAt}, ...] olarak döner.
+const CANDIDATE_COMMENTS_API_URL = "https://script.google.com/macros/s/AKfycbzFNeaTMBU0NBJCa9iWiKvexj5f3dEakhwhmCAR8oJwmxWHqQB_ej8-bwqm-maBYI8/exec";
+const COMMENT_AUTHOR_KEY = "ik_ulasim_comment_author_v1";
+
+function getSavedCommentAuthor() {
+  try {
+    return localStorage.getItem(COMMENT_AUTHOR_KEY) || "";
+  } catch {
+    return "";
+  }
+}
+function saveCommentAuthor(name) {
+  try {
+    localStorage.setItem(COMMENT_AUTHOR_KEY, name);
+  } catch {
+    /* localStorage yoksa sessizce geç */
+  }
+}
+
+async function fetchCommentsForCandidate(candidateId) {
+  if (!CANDIDATE_COMMENTS_API_URL) return [];
+  const res = await fetch(`${CANDIDATE_COMMENTS_API_URL}?action=getComments&candidateId=${encodeURIComponent(candidateId)}`);
+  if (!res.ok) throw new Error("Yorumlar alınamadı");
+  const data = await res.json();
+  return Array.isArray(data) ? data : data.comments || [];
+}
+
+async function postCandidateComment(comment) {
+  const res = await fetch(CANDIDATE_COMMENTS_API_URL, {
+    method: "POST",
+    headers: { "Content-Type": "text/plain;charset=utf-8" },
+    body: JSON.stringify({ action: "addComment", comment }),
+  });
+  const data = await res.json();
+  if (!data.ok) throw new Error(data.error || "Yorum eklenemedi");
+  return data;
+}
+
+function formatCommentDate(iso) {
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return "";
+  return d.toLocaleString("tr-TR", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" });
+}
+
+function renderCommentsList(container, comments) {
+  if (!comments.length) {
+    container.innerHTML = `<div class="text-xs text-slate-400 py-2">Henüz yorum yok — ilk yorumu sen ekle.</div>`;
+    return;
+  }
+  container.innerHTML = comments
+    .map(
+      (c) => `
+      <div class="border-b border-slate-100 py-2">
+        <div class="flex items-baseline justify-between gap-2">
+          <span class="text-xs font-semibold text-slate-700">${c.author || "İsimsiz"}</span>
+          <span class="text-[10px] text-slate-400 whitespace-nowrap">${formatCommentDate(c.createdAt)}</span>
+        </div>
+        <div class="text-sm text-slate-600 mt-0.5">${c.text}</div>
+      </div>`
+    )
+    .join("");
+}
+
+/** candidateFsDetail içindeki #candidateCommentsSection'ı doldurur — async, seçili aday bu arada değişmiş olabilir diye kontrol eder. */
+function renderCommentsSection(candidateId, candidateName) {
+  const host = document.getElementById("candidateCommentsSection");
+  if (!host) return;
+
+  if (!CANDIDATE_COMMENTS_API_URL) {
+    host.innerHTML = `<div class="text-xs text-slate-400 leading-snug">Yorumlar için paylaşımlı sunucu henüz ayarlanmadı — ekip genelinde kullanılabilecek bu özellik kurulunca burada aktif olacak.</div>`;
+    return;
+  }
+
+  host.innerHTML = `<div class="text-xs text-slate-400 py-2">Yorumlar yükleniyor…</div>`;
+  const savedAuthor = getSavedCommentAuthor();
+  const formHtml = `
+    <div class="mt-3 pt-3 border-t border-slate-100">
+      <input id="commentAuthorInput" type="text" placeholder="Adınız" value="${savedAuthor}" class="w-full border border-slate-200 rounded-lg px-3 py-1.5 text-sm mb-1.5" />
+      <textarea id="commentTextInput" rows="2" placeholder="Bu aday hakkında bir not ekle…" class="w-full border border-slate-200 rounded-lg px-3 py-1.5 text-sm resize-none"></textarea>
+      <div class="flex items-center justify-between mt-1.5">
+        <span id="commentStatus" class="text-[11px] text-slate-400"></span>
+        <button id="commentSubmitBtn" type="button" class="px-3 py-1.5 rounded-lg text-xs font-semibold bg-indigo-600 hover:bg-indigo-700 text-white">Yorum Ekle</button>
+      </div>
+    </div>`;
+
+  fetchCommentsForCandidate(candidateId)
+    .then((comments) => {
+      if (selectedCandidateId !== candidateId) return; // kullanıcı bu arada başka bir aday seçmiş
+      const listEl = document.createElement("div");
+      renderCommentsList(listEl, comments);
+      host.innerHTML = "";
+      host.appendChild(listEl);
+      host.insertAdjacentHTML("beforeend", formHtml);
+      wireCommentForm(candidateId, candidateName, listEl, comments);
+    })
+    .catch(() => {
+      if (selectedCandidateId !== candidateId) return;
+      host.innerHTML = `<div class="text-xs text-red-500 py-2">Yorumlar yüklenemedi — bağlantıyı kontrol edip tekrar seç.</div>${formHtml}`;
+      wireCommentForm(candidateId, candidateName, null, []);
+    });
+}
+
+function wireCommentForm(candidateId, candidateName, listEl, existingComments) {
+  const authorInput = document.getElementById("commentAuthorInput");
+  const textInput = document.getElementById("commentTextInput");
+  const statusEl = document.getElementById("commentStatus");
+  const submitBtn = document.getElementById("commentSubmitBtn");
+  if (!submitBtn) return;
+
+  submitBtn.addEventListener("click", async () => {
+    const author = authorInput.value.trim();
+    const text = textInput.value.trim();
+    if (!author || !text) {
+      statusEl.textContent = "Ad ve yorum metni gerekli.";
+      return;
+    }
+    saveCommentAuthor(author);
+    submitBtn.disabled = true;
+    statusEl.textContent = "Kaydediliyor…";
+    const comment = { candidateId, candidateName, author, text, createdAt: new Date().toISOString() };
+    try {
+      await postCandidateComment(comment);
+      textInput.value = "";
+      statusEl.textContent = "Eklendi.";
+      existingComments = [comment, ...existingComments];
+      if (listEl) renderCommentsList(listEl, existingComments);
+    } catch {
+      statusEl.textContent = "Kaydedilemedi — bağlantıyı kontrol edip tekrar dene.";
+    } finally {
+      submitBtn.disabled = false;
+    }
+  });
+}
+
+// ---------------------------------------------------------------------------
+// 8) TOPLU EŞLEŞTİRME — kapasiteli, aç gözlü (greedy) çoklu-proje eşleştirme
+// ---------------------------------------------------------------------------
+// Tek tek "Proje -> Gerçek Adaylar" bakışı, aynı iyi adayları HER projeye
+// ayrı ayrı öneriyor — aynı kişi birden fazla projeye "en iyi seçenek" gibi
+// görünüp İK'nın farkında olmadan aynı adayı iki yere birden yönlendirmesine
+// yol açabiliyordu; ayrıca hiçbir yerde "bu projeye kaç kişi lazım" bilgisi
+// tutulmuyordu. Bu bölüm, seçilen birkaç açık proje için TÜM adayları bir
+// arada değerlendirip, en yüksek puanlı eşleşmeden başlayarak (aç gözlü)
+// her adayı EN FAZLA BİR projeye, kontenjan doldukça sıradaki adaya geçerek
+// atar. Tam optimal değildir (o, Macar algoritması/atama problemi çözümü
+// gerektirir) ama gerçek problemi — aynı adayın birden fazla yere
+// önerilmesini ve kontenjansız atamayı — hemen, anlaşılır şekilde çözer.
+
+const batchMatchBtn = document.getElementById("batchMatchBtn");
+const batchMatchView = document.getElementById("batchMatchView");
+const batchMatchBackBtn = document.getElementById("batchMatchBackBtn");
+const batchMatchRunBtn = document.getElementById("batchMatchRunBtn");
+const batchMatchStatus = document.getElementById("batchMatchStatus");
+const batchMatchProjectList = document.getElementById("batchMatchProjectList");
+const batchMatchResults = document.getElementById("batchMatchResults");
+
+// Sonuç listesi her eşleştirmede baştan çiziliyor (innerHTML) — bu yüzden
+// tek tek satırlara değil, konteynerin kendisine (event delegation) bir kez
+// bağlanıyor.
+batchMatchResults.addEventListener("click", (e) => {
+  const row = e.target.closest(".batch-candidate-row");
+  if (!row) return;
+  const r = lastBatchResultsByCandidateId.get(row.dataset.candidateId);
+  if (r) openBatchCandidateModal(r);
+});
+
+/** capacity alanı boş/tanımsız/geçersizse sınırsız kabul edilir. */
+function projectCapacity(project) {
+  const c = project.capacity;
+  if (c == null || c === "") return Infinity;
+  const n = Number(c);
+  return Number.isFinite(n) && n >= 0 ? n : Infinity;
+}
+
+function openBatchMatchView() {
+  batchMatchView.classList.remove("hidden");
+  mainLayout.classList.add("hidden");
+  batchMatchResults.innerHTML = `<div class="text-sm text-slate-400">Soldan proje(ler) seçip "Eşleştir"e bas.</div>`;
+  batchMatchStatus.textContent = "";
+  renderBatchMatchProjectList();
+}
+
+function closeBatchMatchView() {
+  batchMatchView.classList.add("hidden");
+  mainLayout.classList.remove("hidden");
+}
+
+batchMatchBtn.addEventListener("click", openBatchMatchView);
+batchMatchBackBtn.addEventListener("click", closeBatchMatchView);
+
+function renderBatchMatchProjectList() {
+  const bySector = {};
+  activeProjects().forEach((p) => (bySector[p.sector] = bySector[p.sector] || []).push(p));
+  const sectors = Object.keys(bySector).sort();
+
+  batchMatchProjectList.innerHTML = sectors
+    .map((sector) => {
+      const rows = bySector[sector]
+        .slice()
+        .sort((a, b) => a.name.localeCompare(b.name, "tr"))
+        .map(
+          (p) => `
+          <div class="flex items-center gap-2 py-1.5">
+            <input type="checkbox" class="batch-project-checkbox" data-project-id="${p.id}" />
+            <div class="flex-1 min-w-0">
+              <div class="text-xs font-medium text-slate-700 truncate">${p.name}</div>
+              <div class="text-[10px] text-slate-400 truncate">${p.address}</div>
+            </div>
+            <input type="number" min="0" placeholder="Sınırsız" data-project-id="${p.id}"
+              class="batch-project-capacity w-16 border border-slate-200 rounded-md px-1.5 py-1 text-xs"
+              value="${p.capacity != null ? p.capacity : ""}" />
+          </div>`
+        )
+        .join("");
+      return `
+        <div>
+          <div class="text-[10px] font-semibold text-slate-400 uppercase tracking-wide px-1 pt-1">${sector}</div>
+          ${rows}
+        </div>`;
+    })
+    .join("");
+}
+
+batchMatchRunBtn.addEventListener("click", async () => {
+  const checkboxes = Array.from(batchMatchProjectList.querySelectorAll(".batch-project-checkbox:checked"));
+  const projectIds = checkboxes.map((cb) => cb.dataset.projectId);
+  if (!projectIds.length) {
+    batchMatchStatus.textContent = "Önce en az bir proje seç.";
+    return;
+  }
+
+  batchMatchRunBtn.disabled = true;
+  batchMatchStatus.textContent = "Kontenjanlar kaydediliyor…";
+
+  // Kontenjan değişikliklerini kaydet (sadece seçili projeler için, sadece
+  // gerçekten değişenler) — aynı urgent/inactive modallarındaki gibi tek
+  // istekte toplu güncelleme.
+  const patches = [];
+  projectIds.forEach((id) => {
+    const input = batchMatchProjectList.querySelector(`.batch-project-capacity[data-project-id="${id}"]`);
+    const project = ANKARA_DATA.projects.find((p) => p.id === id);
+    const rawValue = input.value.trim();
+    const newCapacity = rawValue === "" ? "" : Number(rawValue);
+    const currentCapacity = project.capacity != null ? project.capacity : "";
+    if (String(newCapacity) !== String(currentCapacity)) {
+      patches.push({ id, patch: { capacity: newCapacity } });
+    }
+  });
+
+  if (patches.length) {
+    try {
+      const { updatedIds } = await postBatchUpdate(patches);
+      patches.forEach(({ id, patch }) => {
+        if (updatedIds.has(id)) {
+          const project = ANKARA_DATA.projects.find((p) => p.id === id);
+          if (project) project.capacity = patch.capacity === "" ? null : patch.capacity;
+        }
+      });
+      saveProjectsCache();
+    } catch {
+      batchMatchStatus.textContent = "Kontenjanlar kaydedilemedi — internet bağlantısını kontrol et.";
+      batchMatchRunBtn.disabled = false;
+      return;
+    }
+  }
+
+  batchMatchStatus.textContent = "Eşleştiriliyor…";
+  batchMatchResults.innerHTML = `<div class="text-sm text-slate-400">Adaylar puanlanıyor…</div>`;
+
+  try {
+    const { assignmentsByProject, unassigned, projects } = await runBatchMatch(projectIds);
+    renderBatchMatchResults(assignmentsByProject, unassigned, projects);
+    batchMatchStatus.textContent = "";
+  } catch {
+    batchMatchStatus.textContent = "Eşleştirme başarısız oldu.";
+  } finally {
+    batchMatchRunBtn.disabled = false;
+  }
+});
+
+/**
+ * Seçilen projeler için TÜM adayları puanlayıp, en yüksek puandan başlayarak
+ * aç gözlü şekilde atar: bir aday zaten bir projeye atandıysa veya bir
+ * projenin kontenjanı dolduysa o eşleşme atlanır. Tam optimal değildir (bkz.
+ * dosya başındaki not) ama O(n·m log(n·m)) karmaşıklığıyla yüzlerce aday ×
+ * birkaç proje için anında çalışır.
+ */
+async function runBatchMatch(projectIds) {
+  const projects = projectIds.map((id) => ANKARA_DATA.projects.find((p) => p.id === id)).filter(Boolean);
+  const candidates = CandidateStore.all();
+
+  const allTriples = [];
+  for (const project of projects) {
+    const results = await Promise.all(candidates.map((c) => scoreCandidateForProject(c, project)));
+    results.forEach((result) => {
+      if (!result.eliminated) allTriples.push({ project, result });
+    });
+  }
+  allTriples.sort((a, b) => b.result.total - a.result.total);
+
+  const capacityLeft = new Map(projects.map((p) => [p.id, projectCapacity(p)]));
+  const assignedCandidateIds = new Set();
+  const assignmentsByProject = new Map(projects.map((p) => [p.id, []]));
+  const consideredCandidateIds = new Set();
+
+  allTriples.forEach(({ project, result }) => {
+    consideredCandidateIds.add(result.candidate.id);
+    if (assignedCandidateIds.has(result.candidate.id)) return;
+    if (capacityLeft.get(project.id) <= 0) return;
+    assignmentsByProject.get(project.id).push(result);
+    assignedCandidateIds.add(result.candidate.id);
+    capacityLeft.set(project.id, capacityLeft.get(project.id) - 1);
+  });
+
+  // "Yerleştirilemeyen" = en az bir seçili projeye uygundu ama kontenjan
+  // yüzünden yer bulamadı (tamamen elenenler burada gösterilmez, onlar zaten
+  // hiçbir projeye uygun değildi — ayrı bir sorun).
+  const unassigned = candidates.filter(
+    (c) => consideredCandidateIds.has(c.id) && !assignedCandidateIds.has(c.id)
+  );
+
+  return { assignmentsByProject, unassigned, projects };
+}
+
+// Son render edilen Toplu Eşleştirme sonuçlarındaki candidate.id -> r eşlemesi
+// — satıra tıklanınca hangi aday/skor/rota detayının modalda açılacağını
+// bulmak için (event delegation, bkz. batchMatchResults click listener'ı).
+let lastBatchResultsByCandidateId = new Map();
+
+function renderBatchMatchResults(assignmentsByProject, unassigned, projects) {
+  const totalAssigned = Array.from(assignmentsByProject.values()).reduce((sum, list) => sum + list.length, 0);
+
+  lastBatchResultsByCandidateId = new Map();
+  assignmentsByProject.forEach((list) => {
+    list.forEach((r) => lastBatchResultsByCandidateId.set(r.candidate.id, r));
+  });
+
+  const projectSectionsHtml = projects
+    .map((p) => {
+      const list = assignmentsByProject.get(p.id) || [];
+      const capacity = projectCapacity(p);
+      const capacityLabel = capacity === Infinity ? "sınırsız" : capacity;
+      const rowsHtml = list.length
+        ? list
+            .map(
+              (r) => `
+              <div class="batch-candidate-row flex items-center justify-between gap-2 py-1.5 border-b border-slate-50 last:border-0 cursor-pointer hover:bg-slate-50 rounded-md px-1 -mx-1" data-candidate-id="${r.candidate.id}">
+                <div class="min-w-0">
+                  <div class="text-sm font-medium text-slate-800 truncate">${r.candidate.fullName || "İsimsiz aday"}</div>
+                  <div class="text-xs text-slate-400">${r.candidate.phoneRaw || "-"}</div>
+                </div>
+                <span class="shrink-0 text-xs font-bold px-2 py-0.5 rounded-full bg-indigo-100 text-indigo-700">${r.total} p</span>
+              </div>`
+            )
+            .join("")
+        : `<div class="text-xs text-slate-400 py-2">Bu projeye uygun aday bulunamadı.</div>`;
+
+      return `
+        <div class="bg-white border border-slate-200 rounded-lg p-4 mb-4">
+          <div class="flex items-baseline justify-between gap-2 mb-2">
+            <div class="text-sm font-bold text-slate-800">${p.name}</div>
+            <div class="text-xs text-slate-400 whitespace-nowrap">${list.length} / ${capacityLabel}</div>
+          </div>
+          ${rowsHtml}
+        </div>`;
+    })
+    .join("");
+
+  const unassignedHtml = unassigned.length
+    ? `
+      <div class="bg-amber-50 border border-amber-200 rounded-lg p-4">
+        <div class="text-sm font-bold text-amber-800 mb-2">Yerleştirilemeyen Adaylar (${unassigned.length})</div>
+        <p class="text-xs text-amber-700 mb-2 leading-snug">Bu adaylar seçili projelerden en az birine uygundu ama kontenjan dolduğu için başka bir adaya yer açıldı.</p>
+        <div class="flex flex-wrap gap-1.5">
+          ${unassigned.map((c) => `<span class="text-xs bg-white border border-amber-200 rounded-full px-2 py-1 text-amber-700">${c.fullName || "İsimsiz aday"}</span>`).join("")}
+        </div>
+      </div>`
+    : "";
+
+  batchMatchResults.innerHTML = `
+    <div class="max-w-3xl">
+      <div class="text-xs text-slate-500 mb-4">${totalAssigned} aday, ${projects.length} projeye dağıtıldı.</div>
+      ${projectSectionsHtml}
+      ${unassignedHtml}
+    </div>`;
+}
