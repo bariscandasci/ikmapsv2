@@ -1204,7 +1204,7 @@ function rankProjectsForOrigin(originId, thresholdMin = null) {
   const origin = originById(originId);
   if (!origin) return [];
 
-  const rows = activeProjects().map((p) => {
+  const rows = applyPositionFilter(activeProjects()).map((p) => {
     const dest = projectById(p.id);
     const estimate = getTransitEstimate(originId, origin, p.id, dest);
     return { project: p, origin, ...estimate };
@@ -1399,7 +1399,8 @@ const originPanel = document.getElementById("panel-origin");
 const projectPanel = document.getElementById("panel-project");
 const originSelect = document.getElementById("originSelect");
 const projectSelect = document.getElementById("projectSelect");
-const thresholdButtons = document.querySelectorAll(".threshold-btn");
+const thresholdButtons = document.querySelectorAll(".threshold-btn[data-threshold]");
+const positionButtons = document.querySelectorAll(".position-btn");
 const resultsList = document.getElementById("resultsList");
 const resultsHeading = document.getElementById("resultsHeading");
 const emptyState = document.getElementById("emptyState");
@@ -1425,6 +1426,12 @@ nearbyLinesToggle.addEventListener("click", () => {
 
 let currentMode = "origin-to-project"; // veya "project-to-origin"
 let currentThreshold = null; // null = tümü
+let currentPositionFilter = null; // null = tümü — proje.position ile eşleşir (bkz. Pozisyon Filtresi)
+
+/** Pozisyon Filtresi seçiliyse listeyi proje.position'a göre daraltır; seçili değilse (Tümü) olduğu gibi döner. */
+function applyPositionFilter(projects) {
+  return currentPositionFilter ? projects.filter((p) => p.position === currentPositionFilter) : projects;
+}
 const enrichedOriginIds = new Set(); // canlı Overpass sorgusu zaten yapılmış origin id'leri
 
 // Select doldur
@@ -1452,7 +1459,7 @@ function rebuildProjectSelect() {
   projectSelect.innerHTML = '<option value="">Seçiniz…</option>';
 
   const projectsBySector = {};
-  activeProjects().forEach((p) => {
+  applyPositionFilter(activeProjects()).forEach((p) => {
     (projectsBySector[p.sector] = projectsBySector[p.sector] || []).push(p);
   });
   Object.keys(projectsBySector)
@@ -1502,6 +1509,26 @@ thresholdButtons.forEach((btn) => {
     currentThreshold = btn.dataset.threshold === "all" ? null : Number(btn.dataset.threshold);
     thresholdButtons.forEach((b) => b.classList.toggle("threshold-btn-active", b === btn));
     runSearch();
+  });
+});
+
+positionButtons.forEach((btn) => {
+  btn.addEventListener("click", () => {
+    currentPositionFilter = btn.dataset.position === "all" ? null : btn.dataset.position;
+    positionButtons.forEach((b) => b.classList.toggle("threshold-btn-active", b === btn));
+    rebuildProjectSelect();
+    // candidates.js app.js'ten SONRA yüklenir — ilk çağrıda henüz tanımlı
+    // olmayabilir, o yüzden varlığı kontrol edilir (bkz. toggleCandidateFullscreen deseni).
+    if (typeof populateCandidateFsProjectSelect === "function") populateCandidateFsProjectSelect();
+    if (
+      (currentMode === "project-to-origin" || currentMode === "project-to-candidates") &&
+      projectSelect.value &&
+      !applyPositionFilter(activeProjects()).some((p) => p.id === projectSelect.value)
+    ) {
+      clearResults();
+    } else {
+      runSearch();
+    }
   });
 });
 
@@ -2286,6 +2313,7 @@ addProjectForm.addEventListener("submit", async (e) => {
     const project = {
       name,
       sector: fd.get("sector"),
+      position: fd.get("position"),
       address: addressText,
       lat: geo.lat,
       lng: geo.lng,

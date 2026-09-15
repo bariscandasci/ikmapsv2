@@ -510,7 +510,7 @@ function populateCandidateFsProjectSelect() {
   const previouslySelected = candidateFsProjectSelect.value;
   candidateFsProjectSelect.innerHTML = '<option value="">Seçiniz…</option>';
   const bySector = {};
-  activeProjects().forEach((p) => (bySector[p.sector] = bySector[p.sector] || []).push(p));
+  applyPositionFilter(activeProjects()).forEach((p) => (bySector[p.sector] = bySector[p.sector] || []).push(p));
   Object.keys(bySector)
     .sort()
     .forEach((sector) => {
@@ -1298,7 +1298,7 @@ batchMatchBackBtn.addEventListener("click", closeBatchMatchView);
 
 function renderBatchMatchProjectList() {
   const bySector = {};
-  activeProjects().forEach((p) => (bySector[p.sector] = bySector[p.sector] || []).push(p));
+  applyPositionFilter(activeProjects()).forEach((p) => (bySector[p.sector] = bySector[p.sector] || []).push(p));
   const sectors = Object.keys(bySector).sort();
 
   batchMatchProjectList.innerHTML = sectors
