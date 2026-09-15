@@ -2034,6 +2034,11 @@ function showRouteResult(estimate) {
   }
 
   routeDetail.classList.remove("hidden");
+  // Sonuç listesi uzun olduğunda (ör. onlarca proje) kullanıcı ortadan/alttan
+  // bir karta tıklayınca rota detayı listenin ÜSTÜNDE render edildiği için
+  // görünmüyordu — kullanıcı manuel yukarı kaydırmak zorunda kalıyordu.
+  // Panel her gösterildiğinde otomatik olarak görünür alana kaydırılır.
+  routeDetail.scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
 // ---------------------------------------------------------------------------
