@@ -165,6 +165,7 @@
         <button id="inactiveBtn" class="text-[11px] font-bold px-2.5 py-1.5 rounded-lg bg-slate-700 hover:bg-slate-800 text-white transition whitespace-nowrap">🔧 Proje Aç/Kapa</button>
         <button id="addProjectBtn" class="text-[11px] font-bold px-2.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white transition whitespace-nowrap">➕ Proje Ekle</button>
         <button id="uploadCandidatesBtn" class="text-[11px] font-bold px-2.5 py-1.5 rounded-lg bg-sky-600 hover:bg-sky-700 text-white transition whitespace-nowrap">📋 Aday Yükle</button>
+        <button id="batchMatchBtn" class="text-[11px] font-bold px-2.5 py-1.5 rounded-lg bg-purple-600 hover:bg-purple-700 text-white transition whitespace-nowrap">🎯 Toplu Eşleştirme</button>
       </div>
     </header>
 
@@ -208,6 +209,16 @@
           <button class="threshold-btn" data-threshold="60">≤ 60 dk</button>
         </div>
       </div>
+
+      <div class="mt-2">
+        <label class="text-xs font-semibold text-slate-600 block mb-1">Pozisyon Filtresi</label>
+        <div class="flex flex-wrap gap-1.5">
+          <button class="threshold-btn position-btn threshold-btn-active" data-position="all">Tümü</button>
+          <button class="threshold-btn position-btn" data-position="Şeflik">Şeflik</button>
+          <button class="threshold-btn position-btn" data-position="Temizlik Görevlisi">Temizlik Görevlisi</button>
+          <button class="threshold-btn position-btn" data-position="Servis">Servis</button>
+        </div>
+      </div>
     </div>
 
     <!-- Kaydırılabilir sonuç bölgesi: üstteki seçim kontrolleri sabit kalır -->
@@ -225,6 +236,10 @@
       <!-- ADIM ADIM ROTA DETAYI -->
       <div id="routeDetail" class="hidden mx-5 mt-2 p-2.5">
         <div id="routeDetailTitle" class="text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1.5"></div>
+        <div id="routeDetailVariantToggle" class="hidden flex gap-2 bg-slate-100 p-1 rounded-lg mb-2">
+          <button type="button" id="routeVariantFastestBtn" class="mode-btn mode-btn-active">⏱ En Hızlı</button>
+          <button type="button" id="routeVariantFewestBtn" class="mode-btn">🔀 En Az Aktarmalı</button>
+        </div>
         <div id="routeDetailWarning" class="hidden text-[11px] font-medium text-amber-700 bg-amber-50 border border-amber-200 rounded-md px-2 py-1.5 mb-2">
           ⚠️ Bu rota tahmini bir hat içeriyor (gerçek EGO hattıyla doğrulanamadı). İK, bu bölümü adaya kesin bilgi gibi aktarmamalı.
         </div>
@@ -308,6 +323,15 @@
         </select>
       </div>
       <div>
+        <label class="text-xs font-semibold text-slate-600">Pozisyon *</label>
+        <select name="position" required class="mt-1 w-full border border-slate-200 rounded-lg px-3 py-1.5 text-sm text-slate-700 bg-white">
+          <option value="Şeflik">Şeflik</option>
+          <option value="Temizlik Görevlisi">Temizlik Görevlisi</option>
+          <option value="Servis">Servis</option>
+        </select>
+        <p class="text-[10px] text-slate-400 mt-0.5">Bu proje için aranan pozisyon — Pozisyon Filtresi'nde bununla eşleşir.</p>
+      </div>
+      <div>
         <label class="text-xs font-semibold text-slate-600">Adres *</label>
         <input name="address" required placeholder="ör. Bilkent, Çankaya" class="mt-1 w-full border border-slate-200 rounded-lg px-3 py-1.5 text-sm text-slate-700" />
       </div>
@@ -343,6 +367,11 @@
         <label class="text-xs font-semibold text-slate-600">Yönlendirme</label>
         <input name="referral" placeholder="Ofise davet>İSG" class="mt-1 w-full border border-slate-200 rounded-lg px-3 py-1.5 text-sm text-slate-700" />
       </div>
+      <div>
+        <label class="text-xs font-semibold text-slate-600">Kontenjan</label>
+        <input name="capacity" type="number" min="0" placeholder="Sınırsız (boş bırakılabilir)" class="mt-1 w-full border border-slate-200 rounded-lg px-3 py-1.5 text-sm text-slate-700" />
+        <p class="text-[10px] text-slate-400 mt-0.5">Toplu Eşleştirme'de bu projeye en fazla kaç aday atanacağını belirler.</p>
+      </div>
       <div id="addProjectStatus" class="text-[11px] text-slate-500 leading-snug"></div>
     </form>
     <div class="flex justify-end gap-2 px-4 py-3 border-t border-slate-100">
@@ -365,7 +394,10 @@
       </p>
       <input id="candidateFileInput" type="file" accept=".xlsx,.xls" class="block w-full text-sm text-slate-600 file:mr-3 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:bg-indigo-50 file:text-indigo-700 file:font-semibold file:cursor-pointer" />
       <div id="candidateMappingArea" class="hidden space-y-2">
-        <div class="text-xs font-semibold text-slate-600">Sütun Eşleme</div>
+        <div class="flex items-center justify-between">
+          <div class="text-xs font-semibold text-slate-600">Sütun Eşleme</div>
+          <button id="candidateAiMapBtn" type="button" class="text-xs font-semibold text-indigo-600 hover:text-indigo-800">✨ AI ile Eşleştir</button>
+        </div>
         <div id="candidateMappingRows" class="space-y-1.5"></div>
       </div>
       <div id="candidateUploadStatus" class="text-[11px] text-slate-500 leading-snug"></div>
@@ -400,8 +432,15 @@
   <div class="flex-1 flex min-h-0">
     <!-- Sol: aday listesi -->
     <div class="w-[360px] shrink-0 border-r border-slate-200 bg-white flex flex-col min-h-0">
-      <div class="p-3 border-b border-slate-100 shrink-0">
-        <input id="candidateFsSearch" type="text" placeholder="İsim veya telefon ara…" class="w-full border border-slate-200 rounded-lg px-3 py-1.5 text-sm text-slate-700" />
+      <div class="p-3 border-b border-slate-100 shrink-0 space-y-2">
+        <div class="flex gap-2">
+          <select id="candidateFsYearFilter" class="shrink-0 border border-slate-200 rounded-lg px-2 py-1.5 text-xs text-slate-700 bg-white">
+            <option value="">Tüm yıllar</option>
+          </select>
+          <input id="candidateFsSearch" type="text" placeholder="İsim/telefon ara ya da doğal dille tarif edin…" class="flex-1 min-w-0 border border-slate-200 rounded-lg px-3 py-1.5 text-sm text-slate-700" />
+          <button id="candidateFsAiFilterBtn" type="button" class="shrink-0 px-2.5 py-1.5 rounded-lg text-xs font-semibold bg-indigo-50 text-indigo-700 hover:bg-indigo-100 whitespace-nowrap">✨ AI Filtre</button>
+        </div>
+        <div id="candidateFsAiFilterStatus" class="flex flex-wrap gap-1.5"></div>
       </div>
       <div id="candidateFsList" class="flex-1 overflow-y-auto p-2 space-y-1.5"></div>
     </div>
@@ -429,8 +468,46 @@
   </div>
 </div>
 
+<!-- TOPLU EŞLEŞTİRME: TAM EKRAN GÖRÜNÜM -->
+<div id="batchMatchView" class="hidden fixed inset-0 z-[1500] bg-slate-50 flex flex-col">
+  <div class="flex items-center gap-3 px-5 py-3 border-b border-slate-200 bg-white shrink-0">
+    <button id="batchMatchBackBtn" type="button" class="text-slate-500 hover:text-slate-700 text-sm font-semibold whitespace-nowrap">← Haritaya dön</button>
+    <div class="w-px h-6 bg-slate-200"></div>
+    <h1 class="text-sm font-bold text-slate-800">Toplu Eşleştirme</h1>
+    <div class="flex-1"></div>
+    <span id="batchMatchStatus" class="text-xs text-slate-400 whitespace-nowrap"></span>
+    <button id="batchMatchRunBtn" type="button" class="px-3 py-1.5 rounded-lg text-sm font-semibold bg-indigo-600 hover:bg-indigo-700 text-white whitespace-nowrap">Eşleştir</button>
+  </div>
+
+  <div class="flex-1 flex min-h-0">
+    <!-- Sol: proje seçimi + kontenjan -->
+    <div class="w-[380px] shrink-0 border-r border-slate-200 bg-white flex flex-col min-h-0">
+      <div class="p-3 border-b border-slate-100 shrink-0">
+        <p class="text-xs text-slate-500 leading-snug">Eşleştirmeye dahil edilecek projeleri işaretle, kontenjanlarını belirle (boş = sınırsız). Her aday en fazla bir projeye atanır — en yüksek puanlı eşleşmeler önce yerleştirilir.</p>
+      </div>
+      <div id="batchMatchProjectList" class="flex-1 overflow-y-auto p-2 space-y-1.5"></div>
+    </div>
+
+    <!-- Sağ: sonuçlar -->
+    <div id="batchMatchResults" class="flex-1 overflow-y-auto p-6">
+      <div class="text-sm text-slate-400">Soldan proje(ler) seçip "Eşleştir"e bas.</div>
+    </div>
+  </div>
+</div>
+
+<!-- TOPLU EŞLEŞTİRME SONUÇLARINDA BİR ADAYA TIKLAYINCA AÇILAN PROFİL MODALI -->
+<div id="batchCandidateModal" class="hidden fixed inset-0 bg-black/40 z-[2500] flex items-center justify-center p-6">
+  <div class="bg-white rounded-xl shadow-xl w-full max-w-xl max-h-[85vh] flex flex-col">
+    <div class="flex items-center justify-between px-4 py-3 border-b border-slate-100 shrink-0">
+      <h2 class="text-sm font-bold text-slate-800">Aday Detayı</h2>
+      <button id="batchCandidateModalClose" class="text-slate-400 hover:text-slate-600 text-lg leading-none">&times;</button>
+    </div>
+    <div id="batchCandidateModalBody" class="flex-1 overflow-y-auto p-5"></div>
+  </div>
+</div>
+
 <script src="data.js?v=56"></script>
-<script src="app.js?v=61"></script>
-<script src="candidates.js?v=7"></script>
+<script src="app.js?v=63"></script>
+<script src="candidates.js?v=13"></script>
 </body>
 </html>

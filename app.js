@@ -413,20 +413,31 @@ function stopsWithinRadius(graph, lat, lng, radiusKm, requireReliableCoord) {
  * ayrı ayrı takip ediliyor; bir durağa gerçekten en hızlı ulaşım ise tüm
  * hat-durumları arasındaki minimum olarak (bestAtStop) ayrıca tutuluyor.
  */
-function runDijkstra(graph, sources) {
+/**
+ * transferPenaltyMin > 0 verilirse, her aktarmaya (gerçek bekleme süresinin
+ * ÜSTÜNE) bu kadar yapay bir ceza eklenir — Dijkstra'yı gerçek süreden ÖNCE
+ * aktarma sayısını azaltmaya zorlamak için ("En Az Aktarmalı" seçeneği,
+ * bkz. buildMinTransfersAlternative). Sıralama bu cezalı süreye (minutes)
+ * göre yapılır ama GERÇEK süre (ceza hariç) ayrıca realMinutes'ta tutulur —
+ * kullanıcıya cezalı/uydurma bir süre asla gösterilmez.
+ */
+function runDijkstra(graph, sources, transferPenaltyMin = 0) {
   const NONE = " "; // henüz hiçbir hatta binilmemiş/sadece yürünüyor durumu
-  const dist = new Map(); // "stopId|lineKey" -> dakika
+  const dist = new Map(); // "stopId|lineKey" -> sıralama için kullanılan (cezalı olabilir) dakika
+  const realDist = new Map(); // "stopId|lineKey" -> GERÇEK dakika (ceza hariç)
   const prev = new Map(); // "stopId|lineKey" -> { fromKey, lineId, mode }
   const keyStopId = new Map(); // "stopId|lineKey" -> stopId
-  const bestAtStop = new Map(); // stopId -> tüm hat-durumları arasında en iyi dakika
+  const bestAtStop = new Map(); // stopId -> tüm hat-durumları arasında en iyi (cezalı olabilir) dakika
   const bestStateAtStop = new Map(); // stopId -> o en iyiye ulaşan durum anahtarı
+  const bestRealMinutesAtStop = new Map(); // stopId -> o en iyiye karşılık gelen GERÇEK süre
   const heap = new MinHeap();
 
-  function relaxBestAtStop(stopId, key, minutes) {
+  function relaxBestAtStop(stopId, key, minutes, realMinutes) {
     const cur = bestAtStop.get(stopId);
     if (cur === undefined || minutes < cur - 1e-9) {
       bestAtStop.set(stopId, minutes);
       bestStateAtStop.set(stopId, key);
+      bestRealMinutesAtStop.set(stopId, realMinutes);
     }
   }
 
@@ -434,9 +445,10 @@ function runDijkstra(graph, sources) {
     const key = stopId + "|" + NONE;
     if (!dist.has(key) || dist.get(key) > startMinutes) {
       dist.set(key, startMinutes);
+      realDist.set(key, startMinutes);
       keyStopId.set(key, stopId);
       heap.push({ stopId, lineKey: NONE, minutes: startMinutes });
-      relaxBestAtStop(stopId, key, startMinutes);
+      relaxBestAtStop(stopId, key, startMinutes, startMinutes);
     }
   });
 
@@ -445,6 +457,7 @@ function runDijkstra(graph, sources) {
     const curKey = cur.stopId + "|" + cur.lineKey;
     if (cur.minutes > dist.get(curKey) + 1e-6) continue; // eski/geçersiz kayıt
     const curLine = cur.lineKey === NONE ? null : cur.lineKey;
+    const curRealMinutes = realDist.get(curKey);
     const edges = graph.adjacency.get(cur.stopId) || [];
     edges.forEach((e) => {
       // Yürüme kenarları durumu HER ZAMAN nötrler (NONE) — hangi hatla
@@ -458,25 +471,29 @@ function runDijkstra(graph, sources) {
       // (biniş hattı değişmiyorsa) hâlâ tamamen bedava.
       let waitCost = 0;
       let newLineKey;
+      const boarding = e.lineId && curLine !== e.lineId;
       if (e.lineId) {
-        if (curLine !== e.lineId) waitCost = avgWaitMin(e.mode);
+        if (boarding) waitCost = avgWaitMin(e.mode);
         newLineKey = e.lineId;
       } else {
         newLineKey = NONE;
       }
-      const newMinutes = cur.minutes + e.minutes + waitCost;
+      const penalty = boarding ? transferPenaltyMin : 0;
+      const newMinutes = cur.minutes + e.minutes + waitCost + penalty;
+      const newRealMinutes = curRealMinutes + e.minutes + waitCost;
       const newKey = e.to + "|" + newLineKey;
       const known = dist.get(newKey);
       if (known === undefined || newMinutes < known - 1e-9) {
         dist.set(newKey, newMinutes);
+        realDist.set(newKey, newRealMinutes);
         keyStopId.set(newKey, e.to);
         prev.set(newKey, { fromKey: curKey, lineId: e.lineId, mode: e.mode });
         heap.push({ stopId: e.to, lineKey: newLineKey, minutes: newMinutes });
-        relaxBestAtStop(e.to, newKey, newMinutes);
+        relaxBestAtStop(e.to, newKey, newMinutes, newRealMinutes);
       }
     });
   }
-  return { prev, keyStopId, bestAtStop, bestStateAtStop };
+  return { prev, keyStopId, bestAtStop, bestStateAtStop, bestRealMinutesAtStop };
 }
 
 // rankProjectsForOrigin/rankDistrictsForProject tek bir tarafı sabit tutup
@@ -485,18 +502,28 @@ function runDijkstra(graph, sources) {
 // proje/ilçe çifti için ayrı bir tam graf taraması gerekirdi).
 // Graf başına ayrı önbellek (Map anahtarı graf nesnesinin kendisi) — hem
 // resmi graf (transitGraph) hem dolmuş dahil graf (transitGraphWithDolmus)
-// için aynı fonksiyonlar kullanılabilsin diye.
+// için aynı fonksiyonlar kullanılabilsin diye. Her graf içinde ayrıca
+// transferPenaltyMin'e göre AYRI bir tek-girişlik yuva tutulur ("varyant") —
+// aksi halde "En Hızlı" (ceza 0) ve "En Az Aktarmalı" (ceza>0) hesapları aynı
+// grafı paylaştığı için sırayla her satırda birbirinin önbelleğini geçersiz
+// kılıp (thrashing) her ikisini de her seferinde sıfırdan koştururdu.
 const dijkstraCacheByGraph = new Map();
 
-function getDijkstraFrom(coords, graph = transitGraph) {
+function getDijkstraFrom(coords, graph = transitGraph, transferPenaltyMin = 0) {
   const key = coords.lat.toFixed(4) + "," + coords.lng.toFixed(4);
-  const cached = dijkstraCacheByGraph.get(graph);
+  const variant = transferPenaltyMin || 0;
+  let variants = dijkstraCacheByGraph.get(graph);
+  if (!variants) {
+    variants = new Map();
+    dijkstraCacheByGraph.set(graph, variants);
+  }
+  const cached = variants.get(variant);
   if (cached && cached.key === key) return cached.result;
   const sources = stopsWithinRadius(graph, coords.lat, coords.lng, NEAREST_STOP_SEARCH_KM, true)
     .slice(0, NEAREST_STOP_MAX_CANDIDATES)
     .map(({ stop, km }) => ({ stopId: stop.id, startMinutes: walkMinutes(km) }));
-  const result = runDijkstra(graph, sources);
-  dijkstraCacheByGraph.set(graph, { key, result });
+  const result = runDijkstra(graph, sources, transferPenaltyMin);
+  variants.set(variant, { key, result });
   return result;
 }
 
@@ -517,11 +544,15 @@ function getDijkstraFrom(coords, graph = transitGraph) {
  * Dönüş: { totalMinutes, pathStopIds, edgeAtStop } ya da her iki nokta
  * arasında (1.2km içinde hiç durak yoksa) null.
  */
-function findRealRoute(originCoords, destCoords, graph = transitGraph, fixedSide = "origin") {
+function findRealRoute(originCoords, destCoords, graph = transitGraph, fixedSide = "origin", transferPenaltyMin = 0) {
   if (!graph) return null;
   const fromCoords = fixedSide === "dest" ? destCoords : originCoords;
   const toCoords = fixedSide === "dest" ? originCoords : destCoords;
-  const { prev, keyStopId, bestAtStop, bestStateAtStop } = getDijkstraFrom(fromCoords, graph);
+  const { prev, keyStopId, bestAtStop, bestStateAtStop, bestRealMinutesAtStop } = getDijkstraFrom(
+    fromCoords,
+    graph,
+    transferPenaltyMin
+  );
   const toCandidates = stopsWithinRadius(graph, toCoords.lat, toCoords.lng, NEAREST_STOP_SEARCH_KM, true).slice(
     0,
     NEAREST_STOP_MAX_CANDIDATES
@@ -531,8 +562,11 @@ function findRealRoute(originCoords, destCoords, graph = transitGraph, fixedSide
   toCandidates.forEach(({ stop, km }) => {
     const d = bestAtStop.get(stop.id);
     if (d === undefined) return;
-    const total = d + walkMinutes(km);
-    if (!best || total < best.total) best = { total, stopId: stop.id };
+    const walk = walkMinutes(km);
+    const total = d + walk; // sıralama için kullanılan (cezalı olabilir) toplam
+    if (!best || total < best.total) {
+      best = { total, stopId: stop.id, realTotal: bestRealMinutesAtStop.get(stop.id) + walk };
+    }
   });
   if (!best) return null;
 
@@ -548,7 +582,7 @@ function findRealRoute(originCoords, destCoords, graph = transitGraph, fixedSide
   }
 
   if (fixedSide !== "dest") {
-    return { totalMinutes: best.total, pathStopIds, edgeAtStop };
+    return { totalMinutes: best.realTotal, pathStopIds, edgeAtStop };
   }
 
   // Dijkstra dest'ten koşturuldu; pathStopIds şu an dest->origin sırasında.
@@ -558,7 +592,7 @@ function findRealRoute(originCoords, destCoords, graph = transitGraph, fixedSide
   for (let i = 0; i < pathStopIds.length - 1; i++) {
     reversedEdgeAtStop.set(pathStopIds[i], edgeAtStop.get(pathStopIds[i + 1]));
   }
-  return { totalMinutes: best.total, pathStopIds: reversedIds, edgeAtStop: reversedEdgeAtStop };
+  return { totalMinutes: best.realTotal, pathStopIds: reversedIds, edgeAtStop: reversedEdgeAtStop };
 }
 
 /** Bir durak dizisini (ve prev'deki hat bilgisini), ardışık aynı hattı tek adımda birleştirerek adımlara çevirir. */
@@ -668,8 +702,9 @@ function estimateTransit(origin, dest, fixedSide = "origin") {
   const verified = steps.every((s) => s.verified);
 
   const dolmusAlternative = buildDolmusAlternative(origin, dest, originLabel, destLabel, route.totalMinutes, fixedSide);
+  const minTransfersAlternative = buildMinTransfersAlternative(origin, dest, originLabel, destLabel, transfers, durationMin, fixedSide);
 
-  return { durationMin, transfers, routeSummary, steps, distanceKm, verified, dolmusAlternative };
+  return { durationMin, transfers, routeSummary, steps, distanceKm, verified, dolmusAlternative, minTransfersAlternative };
 }
 
 // Ana rota SADECE resmi taşımayla (yukarıda) hesaplanır — dolmuş, resmi
@@ -717,12 +752,60 @@ function buildDolmusAlternative(origin, dest, originLabel, destLabel, officialMi
   };
 }
 
+// "En Az Aktarmalı" seçenek: aynı resmi grafta (dolmuş DAHİL değil — bu ayrı
+// bir kavram), aktarma başına büyük bir yapay süre cezası (bkz. runDijkstra
+// transferPenaltyMin) ekleyerek AYRI bir Dijkstra çalıştırır. Ceza, olası
+// herhangi bir gerçek süre farkından kat kat büyük olduğu için algoritma
+// süreden ÖNCE aktarma sayısını azaltmaya zorlanır — ama kullanıcıya
+// gösterilen süre yine GERÇEK süredir (bkz. findRealRoute'un realTotal'i).
+// Sadece PRİMER (En Hızlı) rotadan GERÇEKTEN daha az aktarmalıysa ayrı bir
+// seçenek olarak sunulur; aksi halde ikisi zaten aynı rotadır.
+const MIN_TRANSFERS_PENALTY_MIN = 2000;
+
+function buildMinTransfersAlternative(origin, dest, originLabel, destLabel, primaryTransfers, primaryDurationMin, fixedSide = "origin") {
+  if (!transitGraph || primaryTransfers === 0) return null; // zaten aktarmasız — daha azı yok
+
+  const altRoute = findRealRoute(origin.coords, dest.coords, transitGraph, fixedSide, MIN_TRANSFERS_PENALTY_MIN);
+  if (!altRoute) return null;
+
+  const altSteps = pathToSteps(altRoute.pathStopIds, altRoute.edgeAtStop, transitGraph);
+
+  const firstStop = transitGraph.stopsById.get(altRoute.pathStopIds[0]);
+  const lastStop = transitGraph.stopsById.get(altRoute.pathStopIds[altRoute.pathStopIds.length - 1]);
+  const firstWalkKm = haversineKm(origin.coords, { lat: firstStop.lat, lng: firstStop.lng });
+  const lastWalkKm = haversineKm({ lat: lastStop.lat, lng: lastStop.lng }, dest.coords);
+
+  if (lastWalkKm > WALK_STEP_MIN_KM) {
+    altSteps.push({ mode: "hub", line: "Yürüyüş", from: lastStop.name, to: destLabel, verified: true, lineId: null });
+  }
+  if (firstWalkKm > WALK_STEP_MIN_KM) {
+    altSteps.unshift({ mode: "hub", line: "Yürüyüş", from: originLabel, to: firstStop.name, verified: true, lineId: null });
+  }
+
+  const altRideSteps = altSteps.filter((s) => s.lineId);
+  const altTransfers = Math.max(altRideSteps.length - 1, 0);
+  if (altTransfers >= primaryTransfers) return null; // gerçekten daha az aktarmalı değilse ayrı bir seçenek olarak gösterme
+
+  const durationMin = Math.max(roundTo5(altRoute.totalMinutes), 5);
+  const routeSummary = altRideSteps.length ? altRideSteps.map((s) => s.line).join(" + ") : "Yürüyüş";
+  const verified = altSteps.every((s) => s.verified);
+
+  return {
+    durationMin,
+    transfers: altTransfers,
+    routeSummary,
+    steps: altSteps,
+    verified,
+    extraMin: Math.max(roundTo5(durationMin - primaryDurationMin), 0),
+  };
+}
+
 // ---------------------------------------------------------------------------
 // 3) İLÇE BAZLI CACHE (localStorage) — gerçek API entegrasyonunda maliyet düşürür
 // ---------------------------------------------------------------------------
 
 const TransitCache = {
-  KEY: "ik_ulasim_cache_v23", // v23: koordinatı tahmini (enterpolasyon/ekstrapolasyon) duraklar artık biniş/iniş veya aktarma noktası olarak kullanılmıyor (bkz. UNRELIABLE_COORD_SOURCES)
+  KEY: "ik_ulasim_cache_v24", // v24: koordinatı tahmini (enterpolasyon/ekstrapolasyon) duraklar artık biniş/iniş veya aktarma noktası olarak kullanılmıyor (bkz. UNRELIABLE_COORD_SOURCES); ayrıca minTransfersAlternative ("En Az Aktarmalı" seçeneği) eklendi — eski kayıtlarda bu alan yok
   _mem: null,
   _load() {
     if (this._mem) return this._mem;
@@ -1234,7 +1317,7 @@ function rankProjectsForOrigin(originId, thresholdMin = null) {
   const origin = originById(originId);
   if (!origin) return [];
 
-  const rows = activeProjects().map((p) => {
+  const rows = applyPositionFilter(activeProjects()).map((p) => {
     const dest = projectById(p.id);
     const estimate = getTransitEstimate(originId, origin, p.id, dest);
     return { project: p, origin, ...estimate };
@@ -1423,12 +1506,13 @@ function refreshProjectMarkers() {
 }
 
 // ---- DOM referansları ----
-const modeButtons = document.querySelectorAll(".mode-btn");
+const modeButtons = document.querySelectorAll(".mode-btn[data-mode]");
 const originPanel = document.getElementById("panel-origin");
 const projectPanel = document.getElementById("panel-project");
 const originSelect = document.getElementById("originSelect");
 const projectSelect = document.getElementById("projectSelect");
-const thresholdButtons = document.querySelectorAll(".threshold-btn");
+const thresholdButtons = document.querySelectorAll(".threshold-btn[data-threshold]");
+const positionButtons = document.querySelectorAll(".position-btn");
 const resultsList = document.getElementById("resultsList");
 const resultsHeading = document.getElementById("resultsHeading");
 const emptyState = document.getElementById("emptyState");
@@ -1437,6 +1521,9 @@ const routeDetailTitle = document.getElementById("routeDetailTitle");
 const routeDetailSteps = document.getElementById("routeDetailSteps");
 const routeDetailWarning = document.getElementById("routeDetailWarning");
 const routeDolmusAlt = document.getElementById("routeDolmusAlt");
+const routeDetailVariantToggle = document.getElementById("routeDetailVariantToggle");
+const routeVariantFastestBtn = document.getElementById("routeVariantFastestBtn");
+const routeVariantFewestBtn = document.getElementById("routeVariantFewestBtn");
 const addressInput = document.getElementById("addressInput");
 const addressSearchBtn = document.getElementById("addressSearchBtn");
 const addressStatus = document.getElementById("addressStatus");
@@ -1454,6 +1541,12 @@ nearbyLinesToggle.addEventListener("click", () => {
 
 let currentMode = "origin-to-project"; // veya "project-to-origin"
 let currentThreshold = null; // null = tümü
+let currentPositionFilter = null; // null = tümü — proje.position ile eşleşir (bkz. Pozisyon Filtresi)
+
+/** Pozisyon Filtresi seçiliyse listeyi proje.position'a göre daraltır; seçili değilse (Tümü) olduğu gibi döner. */
+function applyPositionFilter(projects) {
+  return currentPositionFilter ? projects.filter((p) => p.position === currentPositionFilter) : projects;
+}
 const enrichedOriginIds = new Set(); // canlı Overpass sorgusu zaten yapılmış origin id'leri
 
 // Select doldur
@@ -1481,7 +1574,7 @@ function rebuildProjectSelect() {
   projectSelect.innerHTML = '<option value="">Seçiniz…</option>';
 
   const projectsBySector = {};
-  activeProjects().forEach((p) => {
+  applyPositionFilter(activeProjects()).forEach((p) => {
     (projectsBySector[p.sector] = projectsBySector[p.sector] || []).push(p);
   });
   Object.keys(projectsBySector)
@@ -1531,6 +1624,26 @@ thresholdButtons.forEach((btn) => {
     currentThreshold = btn.dataset.threshold === "all" ? null : Number(btn.dataset.threshold);
     thresholdButtons.forEach((b) => b.classList.toggle("threshold-btn-active", b === btn));
     runSearch();
+  });
+});
+
+positionButtons.forEach((btn) => {
+  btn.addEventListener("click", () => {
+    currentPositionFilter = btn.dataset.position === "all" ? null : btn.dataset.position;
+    positionButtons.forEach((b) => b.classList.toggle("threshold-btn-active", b === btn));
+    rebuildProjectSelect();
+    // candidates.js app.js'ten SONRA yüklenir — ilk çağrıda henüz tanımlı
+    // olmayabilir, o yüzden varlığı kontrol edilir (bkz. toggleCandidateFullscreen deseni).
+    if (typeof populateCandidateFsProjectSelect === "function") populateCandidateFsProjectSelect();
+    if (
+      (currentMode === "project-to-origin" || currentMode === "project-to-candidates") &&
+      projectSelect.value &&
+      !applyPositionFilter(activeProjects()).some((p) => p.id === projectSelect.value)
+    ) {
+      clearResults();
+    } else {
+      runSearch();
+    }
   });
 });
 
@@ -2015,10 +2128,34 @@ function drawRoute(originCoords, row, bucket, destCoordsOverride) {
   }
 }
 
+// showRouteResult'a en son verilen estimate — "En Hızlı"/"En Az Aktarmalı"
+// varyant butonları yeniden arama yapmadan sadece bunun arasında geçiş yapar.
+let currentRouteEstimate = null;
+
+/** routeDetailTitle/Steps/Warning'i estimate'in kendisiyle (En Hızlı) ya da minTransfersAlternative'ıyla (En Az Aktarmalı) doldurur. */
+function renderRouteVariant(estimate, useMinTransfers) {
+  const variant = useMinTransfers ? estimate.minTransfersAlternative : estimate;
+  const extra = useMinTransfers && variant.extraMin ? ` (+${variant.extraMin} dk)` : "";
+  routeDetailTitle.innerHTML = `Rota Detayı · ${variant.transfers} aktarma · ~${variant.durationMin} dk${extra}`;
+  routeDetailSteps.innerHTML = renderRouteSteps(variant.steps);
+  routeDetailWarning.classList.toggle("hidden", variant.verified);
+  routeVariantFastestBtn.classList.toggle("mode-btn-active", !useMinTransfers);
+  routeVariantFewestBtn.classList.toggle("mode-btn-active", useMinTransfers);
+}
+
+routeVariantFastestBtn.addEventListener("click", () => {
+  if (currentRouteEstimate) renderRouteVariant(currentRouteEstimate, false);
+});
+routeVariantFewestBtn.addEventListener("click", () => {
+  if (currentRouteEstimate) renderRouteVariant(currentRouteEstimate, true);
+});
+
 function showRouteResult(estimate) {
-  routeDetailTitle.innerHTML = `Rota Detayı · ${estimate.transfers} aktarma · ~${estimate.durationMin} dk`;
-  routeDetailSteps.innerHTML = renderRouteSteps(estimate.steps);
-  routeDetailWarning.classList.toggle("hidden", estimate.verified);
+  currentRouteEstimate = estimate;
+  // "En Az Aktarmalı" butonu SADECE gerçekten farklı (daha az aktarmalı) bir
+  // seçenek varsa gösterilir — yoksa iki sekme de aynı rotayı gösterirdi.
+  routeDetailVariantToggle.classList.toggle("hidden", !estimate.minTransfersAlternative);
+  renderRouteVariant(estimate, false);
 
   const alt = estimate.dolmusAlternative;
   routeDolmusAlt.classList.toggle("hidden", !alt);
@@ -2036,10 +2173,10 @@ function showRouteResult(estimate) {
   }
 
   routeDetail.classList.remove("hidden");
-  // Rota detayı, sonuç listesinin ÜSTÜNDE ama aynı kaydırılabilir alanda
-  // duruyor — kullanıcı listede aşağı kaydırıp bir sonuca tıkladığında,
-  // detay ekranın dışında (yukarıda) kalıp elle geri kaydırmayı gerektiriyordu.
-  // Otomatik kaydırarak bunu ortadan kaldırıyoruz.
+  // Sonuç listesi uzun olduğunda (ör. onlarca proje) kullanıcı ortadan/alttan
+  // bir karta tıklayınca rota detayı listenin ÜSTÜNDE render edildiği için
+  // görünmüyordu — kullanıcı manuel yukarı kaydırmak zorunda kalıyordu.
+  // Panel her gösterildiğinde otomatik olarak görünür alana kaydırılır.
   routeDetail.scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
@@ -2320,6 +2457,7 @@ addProjectForm.addEventListener("submit", async (e) => {
     const project = {
       name,
       sector: fd.get("sector"),
+      position: fd.get("position"),
       address: addressText,
       lat: geo.lat,
       lng: geo.lng,
@@ -2330,6 +2468,7 @@ addProjectForm.addEventListener("submit", async (e) => {
       transport: fd.get("transport").trim(),
       referral: fd.get("referral").trim(),
       gender: fd.get("gender"),
+      capacity: fd.get("capacity").trim(),
       urgent: false,
       active: true,
     };
