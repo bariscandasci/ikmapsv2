@@ -76,6 +76,18 @@ const CandidateStore = {
     } catch {
       this._mem = [];
     }
+    // Tek seferlik onarım: eski bir sürümde "Yaş" sütunu bazen doğum tarihi
+    // sütunuyla eşleşip Excel'in seri tarih sayısı (ör. 27312) olduğu gibi
+    // yaş olarak kaydedilmişti (bkz. deriveAge). Zaten diskte duran kayıtları
+    // burada, sayfa her yüklendiğinde sessizce onarır.
+    let repaired = false;
+    this._mem.forEach((c) => {
+      if (c.age != null && (c.age < 14 || c.age > 100)) {
+        c.age = repairImplausibleAgeValue(c.age);
+        repaired = true;
+      }
+    });
+    if (repaired) this._save();
     return this._mem;
   },
   _save() {
@@ -157,16 +169,86 @@ function cellAt(row, idx) {
   return String(row[idx] ?? "").trim();
 }
 
-/** Excel'in seri tarih sayısını ya da serbest metin bir tarihi ISO string'e çevirir; olmazsa null. */
+/**
+ * Excel'in seri tarih sayısını ya da serbest metin bir tarihi ISO string'e
+ * çevirir; olmazsa null. GG.AA.YYYY / GG/AA/YYYY / GG-AA-YYYY (Türkçe/Avrupa
+ * sırası — gün önce) formatı AÇIKÇA ayrıca destekleniyor, çünkü JS'in yerleşik
+ * Date ayrıştırıcısı "15.03.1990" gibi noktalı tarihleri hiç tanımıyor
+ * (Invalid Date), "15/03/1990" gibi eğik çizgili olanları ise ABD sırasıyla
+ * (AA/GG/YYYY) okumaya çalışıp gün>12 olduğunda sessizce yanlış/Invalid
+ * sonuç veriyor.
+ */
 function parseFlexibleDate(raw) {
   if (!raw) return null;
-  const asNum = Number(raw);
-  if (Number.isFinite(asNum) && asNum > 20000 && asNum < 60000) {
-    const epoch = Date.UTC(1899, 11, 30);
-    return new Date(epoch + asNum * 86400000).toISOString();
+  const str = String(raw).trim();
+
+  if (/^\d+$/.test(str)) {
+    const asNum = Number(str);
+    if (asNum > 20000 && asNum < 60000) {
+      const epoch = Date.UTC(1899, 11, 30);
+      return new Date(epoch + asNum * 86400000).toISOString();
+    }
   }
-  const d = new Date(raw);
+
+  const dmy = str.match(/^(\d{1,2})[./-](\d{1,2})[./-](\d{4})$/);
+  if (dmy) {
+    const [, dd, mm, yyyy] = dmy;
+    const d = new Date(Date.UTC(Number(yyyy), Number(mm) - 1, Number(dd)));
+    if (!isNaN(d.getTime())) return d.toISOString();
+    return null;
+  }
+
+  const d = new Date(str);
   return isNaN(d.getTime()) ? null : d.toISOString();
+}
+
+/** Diskte zaten duran, mantıksız bir yaş değerini (bkz. CandidateStore._load) onarmayı dener. */
+function repairImplausibleAgeValue(badAge) {
+  if (badAge > 1000) {
+    const epoch = Date.UTC(1899, 11, 30);
+    const birth = new Date(epoch + badAge * 86400000);
+    if (!isNaN(birth.getTime())) {
+      const age = ageFromBirthDateIso(birth.toISOString());
+      if (age != null && age >= 14 && age <= 100) return age;
+    }
+  }
+  return null; // onarılamadı — yanlış bir sayı göstermektense boş bırak
+}
+
+function ageFromBirthDateIso(iso) {
+  const birth = new Date(iso);
+  if (isNaN(birth.getTime())) return null;
+  const now = new Date();
+  let age = now.getFullYear() - birth.getFullYear();
+  const hadBirthdayThisYear = now.getMonth() > birth.getMonth() || (now.getMonth() === birth.getMonth() && now.getDate() >= birth.getDate());
+  if (!hadBirthdayThisYear) age -= 1;
+  return age;
+}
+
+/**
+ * "Yaş" olarak eşlenen sütun bazen doğrudan bir yaş sayısı değil, bir doğum
+ * tarihi olabilir (ör. kaynak Excel'de "Yaş" diye etiketlenmiş ama içinde
+ * "15.03.1990" ya da Excel'in kendi seri tarih sayısı — 27312 gibi — var).
+ * Önce makul bir yaş (14-100) olup olmadığına bakılır; değilse tarih olarak
+ * yorumlanıp yaşa çevrilir. İkisi de tutmazsa null (uydurma bir sayı
+ * göstermektense boş bırakmak daha doğru).
+ */
+function deriveAge(raw) {
+  if (!raw) return null;
+  const trimmed = String(raw).trim();
+  // SADECE dizinin tamamı rakamsa doğrudan yaş olarak kabul edilir — aksi
+  // halde parseInt("15.03.1990") gibi bir tarihin baştaki "15"ini sessizce
+  // (yanlışlıkla) geçerli bir yaşmış gibi kabul ederdi.
+  if (/^\d{1,3}$/.test(trimmed)) {
+    const asInt = parseInt(trimmed, 10);
+    if (asInt >= 14 && asInt <= 100) return asInt;
+  }
+  const iso = parseFlexibleDate(trimmed);
+  if (iso) {
+    const age = ageFromBirthDateIso(iso);
+    if (age != null && age >= 14 && age <= 100) return age;
+  }
+  return null;
 }
 
 function buildCandidateFromRow(row, mapping, uploadedAt) {
@@ -174,8 +256,7 @@ function buildCandidateFromRow(row, mapping, uploadedAt) {
   const phoneRaw = cellAt(row, mapping.phone);
   const phone = normalizePhone(phoneRaw);
   const addressText = cellAt(row, mapping.addressText);
-  const ageRaw = cellAt(row, mapping.age);
-  const ageNum = ageRaw ? parseInt(ageRaw, 10) : NaN;
+  const age = deriveAge(cellAt(row, mapping.age));
   const genderNorm = cellAt(row, mapping.gender).toLocaleLowerCase("tr");
   const gender = genderNorm.startsWith("k") ? "Kadın" : genderNorm.startsWith("e") ? "Erkek" : null;
   const sectorExperience = cellAt(row, mapping.sectorExperience)
@@ -199,7 +280,7 @@ function buildCandidateFromRow(row, mapping, uploadedAt) {
     neighborhoodId: null,
     coords: null,
     coordsSource: null,
-    age: Number.isFinite(ageNum) ? ageNum : null,
+    age,
     gender,
     sectorExperience,
     certificates,
@@ -359,8 +440,12 @@ async function rankCandidatesForProject(projectId) {
 }
 
 // ---------------------------------------------------------------------------
-// 5) UI — "Proje -> Gerçek Adaylar" sonuç listesi
+// 5) UI — "Proje -> Gerçek Adaylar" TAM EKRAN görünümü
 // ---------------------------------------------------------------------------
+// 209+ adaylık gerçek listelerde cramped bir sidebar listesi yetersiz kaldığı
+// için bu mod harita/sidebar'ı gizleyip tam ekran, iki panelli bir görünüm
+// açar: solda aranabilir aday listesi, sağda seçili adayın tam detayı
+// (puan dökümü + gerçek rota + tüm Excel alanları).
 
 const CANDIDATE_STALE_DAYS = 30;
 
@@ -371,83 +456,243 @@ function daysSince(isoDateStr) {
   return Math.floor((Date.now() - d.getTime()) / 86400000);
 }
 
-function buildCandidateResultCard(r) {
-  const card = document.createElement("div");
-  const freshnessBasis = r.candidate.appliedAt || r.candidate.uploadedAt;
-  const staleDays = daysSince(freshnessBasis);
-  const isStale = staleDays !== null && staleDays > CANDIDATE_STALE_DAYS;
-  card.className = `candidate-card ${r.eliminated ? "candidate-card-eliminated" : ""}`;
+const mainLayout = document.getElementById("mainLayout");
+const candidateFullscreenView = document.getElementById("candidateFullscreenView");
+const candidateFsBackBtn = document.getElementById("candidateFsBackBtn");
+const candidateFsProjectSelect = document.getElementById("candidateFsProjectSelect");
+const candidateFsSearch = document.getElementById("candidateFsSearch");
+const candidateFsList = document.getElementById("candidateFsList");
+const candidateFsDetail = document.getElementById("candidateFsDetail");
+const candidateFsCount = document.getElementById("candidateFsCount");
 
-  const breakdownHtml = r.breakdown
-    ? Object.entries(r.breakdown)
-        .map(([k, v]) => `<span class="candidate-score-chip">${CANDIDATE_SCORE_LABELS[k]}: ${v}</span>`)
-        .join("")
-    : "";
+let lastCandidateFsResults = [];
+let lastCandidateFsProjectId = null;
+let selectedCandidateId = null;
 
-  const sourceLabel = r.candidate.source ? ` · ${r.candidate.source}` : "";
-  const staleHtml = isStale
-    ? `<div class="text-[10px] text-amber-600 font-semibold mt-1.5">⚠️ ${staleDays} gündür güncellenmedi — İK, adayla tekrar teyit etmeli</div>`
-    : "";
-
-  card.innerHTML = `
-    <div class="flex items-start justify-between gap-2">
-      <div class="min-w-0">
-        <div class="font-semibold text-slate-800 truncate">${r.candidate.fullName || "İsimsiz aday"}</div>
-        <div class="text-xs text-slate-500">${r.candidate.phoneRaw || "-"}${sourceLabel}</div>
-      </div>
-      ${
-        r.eliminated
-          ? `<span class="shrink-0 text-[10px] font-bold px-2 py-1 rounded-full bg-slate-200 text-slate-500 whitespace-nowrap">ELENDİ</span>`
-          : `<span class="shrink-0 text-sm font-bold px-2 py-1 rounded-full bg-indigo-100 text-indigo-700 whitespace-nowrap">${r.total} p</span>`
-      }
-    </div>
-    ${
-      r.eliminated
-        ? `<div class="text-[11px] text-red-600 mt-1.5">${r.reasons.join(", ")}</div>`
-        : `<div class="flex flex-wrap gap-1 mt-1.5">${breakdownHtml}</div>
-           <div class="text-[11px] text-slate-500 mt-1.5">${r.estimate.durationMin} dk · ${r.estimate.transfers} aktarma${r.estimate.verified ? "" : " · TAHMİNİ"}</div>`
-    }
-    ${staleHtml}
-  `;
-  return card;
+/** app.js'teki rebuildProjectSelect() ile aynı grup/sırlama mantığı — ayrı select olduğu için tekrarlanıyor. */
+function populateCandidateFsProjectSelect() {
+  const previouslySelected = candidateFsProjectSelect.value;
+  candidateFsProjectSelect.innerHTML = '<option value="">Seçiniz…</option>';
+  const bySector = {};
+  activeProjects().forEach((p) => (bySector[p.sector] = bySector[p.sector] || []).push(p));
+  Object.keys(bySector)
+    .sort()
+    .forEach((sector) => {
+      const optGroup = document.createElement("optgroup");
+      optGroup.label = sector;
+      bySector[sector]
+        .slice()
+        .sort((a, b) => a.name.localeCompare(b.name, "tr"))
+        .forEach((p) => {
+          const opt = document.createElement("option");
+          opt.value = p.id;
+          opt.textContent = `${p.name} — ${p.address}`;
+          optGroup.appendChild(opt);
+        });
+      candidateFsProjectSelect.appendChild(optGroup);
+    });
+  if (previouslySelected) candidateFsProjectSelect.value = previouslySelected;
 }
+
+/** Tam ekran görünümü açar/kapatır — app.js'teki mod butonu handler'ından çağrılır. */
+function toggleCandidateFullscreen(show) {
+  candidateFullscreenView.classList.toggle("hidden", !show);
+  mainLayout.classList.toggle("hidden", show);
+  if (!show) return;
+
+  populateCandidateFsProjectSelect();
+  if (projectSelect.value) {
+    candidateFsProjectSelect.value = projectSelect.value;
+    renderCandidateFsResults(projectSelect.value);
+  } else {
+    candidateFsList.innerHTML = `<div class="text-xs text-slate-400 px-2 py-4">Üstten bir proje seçin.</div>`;
+    candidateFsCount.textContent = "";
+    candidateFsDetail.innerHTML = `<div class="text-sm text-slate-400">Detayları görmek için soldan bir aday seçin.</div>`;
+  }
+}
+
+candidateFsBackBtn.addEventListener("click", () => {
+  document.querySelector('.mode-btn[data-mode="origin-to-project"]').click();
+});
+
+candidateFsProjectSelect.addEventListener("change", () => {
+  projectSelect.value = candidateFsProjectSelect.value; // ana (gizli) select ile senkron kalsın
+  if (candidateFsProjectSelect.value) {
+    renderCandidateFsResults(candidateFsProjectSelect.value);
+  } else {
+    candidateFsList.innerHTML = "";
+    candidateFsCount.textContent = "";
+    candidateFsDetail.innerHTML = `<div class="text-sm text-slate-400">Detayları görmek için soldan bir aday seçin.</div>`;
+  }
+});
 
 /**
  * currentMode/runSearch bunu app.js'ten çağırır (bkz. app.js runSearch()).
  * Konum çözme (geocode) asenkron olabileceği için bu fonksiyon da asenkron —
  * "puanlanıyor" durumu anında gösterilir, sonuçlar gelince yerini alır.
+ * İsmi "renderProjectToCandidates" — app.js'in runSearch() fonksiyonu bu
+ * ismi çağırıyor, değiştirmeye gerek yok.
  */
 async function renderProjectToCandidates(projectId) {
+  toggleCandidateFullscreen(true);
+  await renderCandidateFsResults(projectId);
+}
+
+async function renderCandidateFsResults(projectId) {
+  lastCandidateFsProjectId = projectId;
+  selectedCandidateId = null;
   const project = ANKARA_DATA.projects.find((p) => p.id === projectId);
-  if (!project) return clearResults();
-
-  routesLayer.clearLayers();
-  resetDistrictMarkers();
-  routeDetail.classList.add("hidden");
-  nearbyLinesPanel.classList.add("hidden");
-
-  const allCandidates = CandidateStore.all();
-  resultsHeading.textContent = `${project.name} → Gerçek Adaylar (${allCandidates.length})`;
-  emptyState.classList.toggle("hidden", allCandidates.length > 0);
-  if (!allCandidates.length) {
-    resultsList.innerHTML = "";
-    emptyState.textContent = "Henüz hiç aday yüklenmedi — üstteki \"📋 Aday Yükle\" ile bir Excel dosyası içe aktarın.";
+  if (!project) {
+    candidateFsList.innerHTML = "";
+    candidateFsCount.textContent = "";
     return;
   }
-  emptyState.textContent = "Sonuçları görmek için yukarıdan bir seçim yapın.";
-  resultsList.innerHTML = `<div class="text-xs text-slate-400 px-1 py-4">Adaylar puanlanıyor…</div>`;
+
+  const allCandidates = CandidateStore.all();
+  if (!allCandidates.length) {
+    candidateFsList.innerHTML = `<div class="text-xs text-slate-400 px-2 py-4 leading-snug">Henüz hiç aday yüklenmedi — üstteki "📋 Aday Yükle" ile bir Excel dosyası içe aktarın.</div>`;
+    candidateFsCount.textContent = "0 aday";
+    candidateFsDetail.innerHTML = `<div class="text-sm text-slate-400">Detayları görmek için soldan bir aday seçin.</div>`;
+    return;
+  }
+
+  candidateFsCount.textContent = "Puanlanıyor…";
+  candidateFsList.innerHTML = `<div class="text-xs text-slate-400 px-2 py-4">Adaylar puanlanıyor…</div>`;
+  candidateFsDetail.innerHTML = `<div class="text-sm text-slate-400">Detayları görmek için soldan bir aday seçin.</div>`;
 
   const results = await rankCandidatesForProject(projectId);
-  // Puanlama sürerken kullanıcı başka bir seçime geçmiş olabilir — o zaman bu eski sonucu ekrana basma.
-  if (currentMode !== "project-to-candidates" || projectSelect.value !== projectId) return;
+  // Puanlama sürerken kullanıcı başka bir projeye geçmiş olabilir — o zaman bu eski sonucu ekrana basma.
+  if (lastCandidateFsProjectId !== projectId) return;
 
-  resultsList.innerHTML = "";
-  results.forEach((r) => resultsList.appendChild(buildCandidateResultCard(r)));
+  lastCandidateFsResults = results;
+  const eliminatedCount = results.filter((r) => r.eliminated).length;
+  candidateFsCount.textContent = `${results.length} aday (${results.length - eliminatedCount} uygun)`;
+  renderCandidateFsList();
+}
 
-  map.setView([project.coords ? project.coords.lat : project.lat, project.coords ? project.coords.lng : project.lng], 11, {
-    animate: true,
-    duration: 0.8,
+function renderCandidateFsList() {
+  const query = candidateFsSearch.value.trim().toLocaleLowerCase("tr");
+  const queryDigits = query.replace(/\D/g, "");
+  const filtered = query
+    ? lastCandidateFsResults.filter((r) => {
+        const name = (r.candidate.fullName || "").toLocaleLowerCase("tr");
+        const phone = r.candidate.phone || "";
+        return name.includes(query) || (queryDigits && phone.includes(queryDigits));
+      })
+    : lastCandidateFsResults;
+
+  candidateFsList.innerHTML = "";
+  if (!filtered.length) {
+    candidateFsList.innerHTML = `<div class="text-xs text-slate-400 px-2 py-4">Sonuç yok.</div>`;
+    return;
+  }
+  filtered.forEach((r) => candidateFsList.appendChild(buildCandidateFsRow(r)));
+}
+
+candidateFsSearch.addEventListener("input", renderCandidateFsList);
+
+function buildCandidateFsRow(r) {
+  const row = document.createElement("button");
+  row.type = "button";
+  const isSelected = r.candidate.id === selectedCandidateId;
+  row.className = `candidate-card ${isSelected ? "candidate-card-selected" : ""} ${r.eliminated ? "candidate-card-eliminated" : ""}`;
+  row.innerHTML = `
+    <div class="flex items-center justify-between gap-2">
+      <div class="min-w-0">
+        <div class="text-sm font-semibold text-slate-800 truncate">${r.candidate.fullName || "İsimsiz aday"}</div>
+        <div class="text-xs text-slate-500">${r.candidate.phoneRaw || "-"}</div>
+      </div>
+      ${
+        r.eliminated
+          ? `<span class="shrink-0 text-[10px] font-bold px-1.5 py-0.5 rounded bg-slate-200 text-slate-500 whitespace-nowrap">ELENDİ</span>`
+          : `<span class="shrink-0 text-xs font-bold px-2 py-0.5 rounded-full bg-indigo-100 text-indigo-700 whitespace-nowrap">${r.total} p</span>`
+      }
+    </div>`;
+  row.addEventListener("click", () => {
+    selectedCandidateId = r.candidate.id;
+    renderCandidateFsList();
+    renderCandidateDetail(r);
   });
+  return row;
+}
+
+function renderCandidateDetail(r) {
+  const c = r.candidate;
+  const freshnessBasis = c.appliedAt || c.uploadedAt;
+  const staleDays = daysSince(freshnessBasis);
+  const isStale = staleDays !== null && staleDays > CANDIDATE_STALE_DAYS;
+
+  const headerHtml = `
+    <div class="flex items-start justify-between gap-3 mb-4">
+      <div>
+        <div class="text-lg font-bold text-slate-800">${c.fullName || "İsimsiz aday"}</div>
+        ${isStale ? `<div class="text-xs text-amber-600 font-semibold mt-0.5">⚠️ ${staleDays} gündür güncellenmedi — İK, adayla tekrar teyit etmeli</div>` : ""}
+      </div>
+      ${
+        r.eliminated
+          ? `<span class="shrink-0 text-xs font-bold px-3 py-1.5 rounded-full bg-slate-200 text-slate-500">ELENDİ</span>`
+          : `<span class="shrink-0 text-xl font-bold px-3 py-1.5 rounded-full bg-indigo-100 text-indigo-700">${r.total} puan</span>`
+      }
+    </div>`;
+
+  const eliminationHtml = r.eliminated
+    ? `<div class="mb-5 p-3 rounded-lg bg-red-50 border border-red-200 text-sm text-red-700">${r.reasons.join(", ")}</div>`
+    : "";
+
+  const scoreBarsHtml = r.breakdown
+    ? `<div class="mb-5 space-y-2.5">
+        ${Object.entries(r.breakdown)
+          .map(([k, v]) => {
+            const max = CANDIDATE_SCORE_WEIGHTS[k];
+            const pct = Math.round((v / max) * 100);
+            return `
+            <div>
+              <div class="flex justify-between text-xs text-slate-500 mb-1"><span>${CANDIDATE_SCORE_LABELS[k]}</span><span>${v}/${max}</span></div>
+              <div class="candidate-score-bar-track"><div class="candidate-score-bar-fill" style="width:${pct}%"></div></div>
+            </div>`;
+          })
+          .join("")}
+      </div>`
+    : "";
+
+  const routeHtml =
+    !r.eliminated && r.estimate
+      ? `<div class="mb-5">
+          <div class="text-xs font-semibold text-slate-500 uppercase tracking-wide mb-2">Projeye Rota · ${r.estimate.durationMin} dk · ${r.estimate.transfers} aktarma${r.estimate.verified ? "" : " · TAHMİNİ"}</div>
+          <div class="border border-slate-200 rounded-lg p-3">${renderRouteSteps(r.estimate.steps)}</div>
+        </div>`
+      : "";
+
+  const infoRows = [
+    ["Telefon", c.phoneRaw || "-"],
+    ["Adres / İlçe", c.addressText || "-"],
+    ["Yaş", c.age != null ? c.age : "-"],
+    ["Cinsiyet", c.gender || "-"],
+    ["Sektör Deneyimi", (c.sectorExperience || []).join(", ") || "-"],
+    ["Sertifika / Belge", (c.certificates || []).join(", ") || "-"],
+    ["Kaynak", (c.mergedSources || []).join(", ") || c.source || "-"],
+    ["Başvuru Tarihi", c.appliedAt ? new Date(c.appliedAt).toLocaleDateString("tr-TR") : "-"],
+    ["Sisteme Yüklenme", c.uploadedAt ? new Date(c.uploadedAt).toLocaleDateString("tr-TR") : "-"],
+  ];
+  const infoHtml = `<div class="border-t border-slate-100 pt-3">
+    ${infoRows
+      .map(
+        ([label, value]) =>
+          `<div class="flex justify-between gap-3 py-1.5 border-b border-slate-100 text-sm">
+            <span class="text-slate-500">${label}</span><span class="font-medium text-slate-800 text-right">${value}</span>
+          </div>`
+      )
+      .join("")}
+  </div>`;
+
+  const commentsHtml = `
+    <div class="mt-5 pt-4 border-t border-slate-200">
+      <div class="text-xs font-semibold text-slate-500 uppercase tracking-wide mb-2">Yorumlar</div>
+      <div id="candidateCommentsSection"></div>
+    </div>`;
+
+  candidateFsDetail.innerHTML = `<div class="max-w-xl">${headerHtml}${eliminationHtml}${scoreBarsHtml}${routeHtml}${infoHtml}${commentsHtml}</div>`;
+  renderCommentsSection(c.id, c.fullName);
 }
 
 // ---------------------------------------------------------------------------
@@ -577,4 +822,241 @@ candidateImportBtn.addEventListener("click", () => {
     ` Toplam ${CandidateStore.all().length} aday.`;
 
   if (currentMode === "project-to-candidates" && projectSelect.value) runSearch();
+});
+
+// ---------------------------------------------------------------------------
+// 7) ADAY YORUMLARI — ekip içi paylaşımlı notlar (Google Apps Script + Sheet)
+// ---------------------------------------------------------------------------
+// Yorumlar telefon bazlı candidate.id'ye göre saklanır — bu sayede aday
+// listesinin kendisi paylaşımlı olmasa bile (bkz. dosya başındaki NOT), aynı
+// telefonla farklı bilgisayarlarda içe aktarılan bir aday üzerindeki yorumlar
+// herkese görünür (aynı ID'ye düşerler).
+//
+// KURULUM: CANDIDATE_COMMENTS_API_URL boşken bu bölüm sessizce devre dışı
+// kalır (arayüzde "sunucu henüz ayarlanmadı" notu gösterilir, hata vermez).
+// Mevcut proje Apps Script'ine aşağıdaki action'lar eklenince buraya o
+// script'in /exec URL'si yazılmalı:
+//   - POST {action:"addComment", comment:{candidateId, candidateName, author, text, createdAt}}
+//     -> {ok:true} döner, "Comments" adında bir sayfaya (yoksa oluşturularak) satır ekler.
+//   - GET ?action=getComments&candidateId=... -> o candidateId'ye ait yorumları
+//     [{candidateId, candidateName, author, text, createdAt}, ...] olarak (en yeni en üstte) döner.
+const CANDIDATE_COMMENTS_API_URL = "https://script.google.com/macros/s/AKfycbzFNeaTMBU0NBJCa9iWiKvexj5f3dEakhwhmCAR8oJwmxWHqQB_ej8-bwqm-maBYI8/exec";
+const COMMENT_AUTHOR_KEY = "ik_ulasim_comment_author_v1";
+
+function getSavedCommentAuthor() {
+  try {
+    return localStorage.getItem(COMMENT_AUTHOR_KEY) || "";
+  } catch {
+    return "";
+  }
+}
+function saveCommentAuthor(name) {
+  try {
+    localStorage.setItem(COMMENT_AUTHOR_KEY, name);
+  } catch {
+    /* localStorage yoksa sessizce geç */
+  }
+}
+
+async function fetchCommentsForCandidate(candidateId) {
+  if (!CANDIDATE_COMMENTS_API_URL) return [];
+  const res = await fetch(`${CANDIDATE_COMMENTS_API_URL}?action=getComments&candidateId=${encodeURIComponent(candidateId)}`);
+  if (!res.ok) throw new Error("Yorumlar alınamadı");
+  const data = await res.json();
+  return Array.isArray(data) ? data : data.comments || [];
+}
+
+async function postCandidateComment(comment) {
+  const res = await fetch(CANDIDATE_COMMENTS_API_URL, {
+    method: "POST",
+    headers: { "Content-Type": "text/plain;charset=utf-8" },
+    body: JSON.stringify({ action: "addComment", comment }),
+  });
+  const data = await res.json();
+  if (!data.ok) throw new Error(data.error || "Yorum eklenemedi");
+  return data;
+}
+
+function formatCommentDate(iso) {
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return "";
+  return d.toLocaleString("tr-TR", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" });
+}
+
+function renderCommentsList(container, comments) {
+  if (!comments.length) {
+    container.innerHTML = `<div class="text-xs text-slate-400 py-2">Henüz yorum yok — ilk yorumu sen ekle.</div>`;
+    return;
+  }
+  container.innerHTML = comments
+    .map(
+      (c) => `
+      <div class="border-b border-slate-100 py-2">
+        <div class="flex items-baseline justify-between gap-2">
+          <span class="text-xs font-semibold text-slate-700">${c.author || "İsimsiz"}</span>
+          <span class="text-[10px] text-slate-400 whitespace-nowrap">${formatCommentDate(c.createdAt)}</span>
+        </div>
+        <div class="text-sm text-slate-600 mt-0.5">${c.text}</div>
+      </div>`
+    )
+    .join("");
+}
+
+/** candidateFsDetail içindeki #candidateCommentsSection'ı doldurur — async, seçili aday bu arada değişmiş olabilir diye kontrol eder. */
+function renderCommentsSection(candidateId, candidateName) {
+  const host = document.getElementById("candidateCommentsSection");
+  if (!host) return;
+
+  if (!CANDIDATE_COMMENTS_API_URL) {
+    host.innerHTML = `<div class="text-xs text-slate-400 leading-snug">Yorumlar için paylaşımlı sunucu henüz ayarlanmadı — ekip genelinde kullanılabilecek bu özellik kurulunca burada aktif olacak.</div>`;
+    return;
+  }
+
+  host.innerHTML = `<div class="text-xs text-slate-400 py-2">Yorumlar yükleniyor…</div>`;
+  const savedAuthor = getSavedCommentAuthor();
+  const formHtml = `
+    <div class="mt-3 pt-3 border-t border-slate-100">
+      <input id="commentAuthorInput" type="text" placeholder="Adınız" value="${savedAuthor}" class="w-full border border-slate-200 rounded-lg px-3 py-1.5 text-sm mb-1.5" />
+      <textarea id="commentTextInput" rows="2" placeholder="Bu aday hakkında bir not ekle…" class="w-full border border-slate-200 rounded-lg px-3 py-1.5 text-sm resize-none"></textarea>
+      <div class="flex items-center justify-between mt-1.5">
+        <span id="commentStatus" class="text-[11px] text-slate-400"></span>
+        <button id="commentSubmitBtn" type="button" class="px-3 py-1.5 rounded-lg text-xs font-semibold bg-indigo-600 hover:bg-indigo-700 text-white">Yorum Ekle</button>
+      </div>
+    </div>`;
+
+  fetchCommentsForCandidate(candidateId)
+    .then((comments) => {
+      if (selectedCandidateId !== candidateId) return; // kullanıcı bu arada başka bir aday seçmiş
+      const listEl = document.createElement("div");
+      renderCommentsList(listEl, comments);
+      host.innerHTML = "";
+      host.appendChild(listEl);
+      host.insertAdjacentHTML("beforeend", formHtml);
+      wireCommentForm(candidateId, candidateName, listEl, comments);
+    })
+    .catch(() => {
+      if (selectedCandidateId !== candidateId) return;
+      host.innerHTML = `<div class="text-xs text-red-500 py-2">Yorumlar yüklenemedi — bağlantıyı kontrol edip tekrar seç.</div>${formHtml}`;
+      wireCommentForm(candidateId, candidateName, null, []);
+    });
+}
+
+function wireCommentForm(candidateId, candidateName, listEl, existingComments) {
+  const authorInput = document.getElementById("commentAuthorInput");
+  const textInput = document.getElementById("commentTextInput");
+  const statusEl = document.getElementById("commentStatus");
+  const submitBtn = document.getElementById("commentSubmitBtn");
+  if (!submitBtn) return;
+
+  submitBtn.addEventListener("click", async () => {
+    const author = authorInput.value.trim();
+    const text = textInput.value.trim();
+    if (!author || !text) {
+      statusEl.textContent = "Ad ve yorum metni gerekli.";
+      return;
+    }
+    saveCommentAuthor(author);
+    submitBtn.disabled = true;
+    statusEl.textContent = "Kaydediliyor…";
+    const comment = { candidateId, candidateName, author, text, createdAt: new Date().toISOString() };
+    try {
+      await postCandidateComment(comment);
+      textInput.value = "";
+      statusEl.textContent = "Eklendi.";
+      existingComments = [comment, ...existingComments];
+      if (listEl) renderCommentsList(listEl, existingComments);
+    } catch {
+      statusEl.textContent = "Kaydedilemedi — bağlantıyı kontrol edip tekrar dene.";
+    } finally {
+      submitBtn.disabled = false;
+    }
+  });
+}
+
+// ---------------------------------------------------------------------------
+// 8) AI'YA SOR — mevcut aday sıralamasına dayalı doğal dil sohbet
+// ---------------------------------------------------------------------------
+// Aynı Apps Script'e (CANDIDATE_COMMENTS_API_URL) yeni bir action daha
+// ekleniyor: "askAI". AI'a SADECE o an ekranda sıralanmış gerçek aday verisi
+// (buildAiContext) bağlam olarak veriliyor — kendi başına tahmin yürütmesin,
+// sadece elimizdeki gerçek listeyi yorumlasın diye.
+const candidateAiBtn = document.getElementById("candidateAiBtn");
+const candidateAiModal = document.getElementById("candidateAiModal");
+const candidateAiClose = document.getElementById("candidateAiClose");
+const candidateAiProjectName = document.getElementById("candidateAiProjectName");
+const candidateAiLog = document.getElementById("candidateAiLog");
+const candidateAiInput = document.getElementById("candidateAiInput");
+const candidateAiSend = document.getElementById("candidateAiSend");
+
+candidateAiBtn.addEventListener("click", () => {
+  if (!lastCandidateFsResults.length) {
+    alert("Önce bir proje seçip adayların sıralanmasını bekle.");
+    return;
+  }
+  const project = ANKARA_DATA.projects.find((p) => p.id === lastCandidateFsProjectId);
+  candidateAiProjectName.textContent = project ? project.name : "";
+  candidateAiModal.classList.remove("hidden");
+  candidateAiInput.focus();
+});
+candidateAiClose.addEventListener("click", () => candidateAiModal.classList.add("hidden"));
+candidateAiModal.addEventListener("click", (e) => {
+  if (e.target === candidateAiModal) candidateAiModal.classList.add("hidden");
+});
+
+/** AI'a gidecek bağlamı, ekrandaki sıralamadan (zaten hesaplanmış) çıkarır — ek bir puanlama YAPILMAZ. */
+function buildAiContext() {
+  return lastCandidateFsResults.map((r) => ({
+    isim: r.candidate.fullName,
+    telefon: r.candidate.phoneRaw,
+    adres: r.candidate.addressText,
+    yas: r.candidate.age,
+    cinsiyet: r.candidate.gender,
+    deneyim: r.candidate.sectorExperience,
+    puan: r.eliminated ? null : r.total,
+    elendiMi: r.eliminated,
+    elenmeSebebi: r.eliminated ? r.reasons.join(", ") : null,
+    projeyeSureDk: r.estimate ? r.estimate.durationMin : null,
+    aktarmaSayisi: r.estimate ? r.estimate.transfers : null,
+  }));
+}
+
+function appendAiMessage(role, text) {
+  const bubble = document.createElement("div");
+  bubble.className =
+    role === "user"
+      ? "self-end max-w-[85%] bg-indigo-600 text-white text-sm rounded-lg px-3 py-2"
+      : "self-start max-w-[85%] bg-slate-100 text-slate-800 text-sm rounded-lg px-3 py-2 whitespace-pre-line";
+  bubble.textContent = text;
+  candidateAiLog.appendChild(bubble);
+  candidateAiLog.scrollTop = candidateAiLog.scrollHeight;
+  return bubble;
+}
+
+async function sendAiQuestion() {
+  const question = candidateAiInput.value.trim();
+  if (!question) return;
+  appendAiMessage("user", question);
+  candidateAiInput.value = "";
+  candidateAiSend.disabled = true;
+  const thinkingBubble = appendAiMessage("ai", "Düşünüyor…");
+
+  try {
+    const res = await fetch(CANDIDATE_COMMENTS_API_URL, {
+      method: "POST",
+      headers: { "Content-Type": "text/plain;charset=utf-8" },
+      body: JSON.stringify({ action: "askAI", question, context: buildAiContext() }),
+    });
+    const data = await res.json();
+    thinkingBubble.textContent = data.ok ? data.answer : `Hata: ${data.error || "bilinmeyen bir sorun oluştu"}`;
+  } catch {
+    thinkingBubble.textContent = "Bağlantı hatası — tekrar dene.";
+  } finally {
+    candidateAiSend.disabled = false;
+    candidateAiLog.scrollTop = candidateAiLog.scrollHeight;
+  }
+}
+
+candidateAiSend.addEventListener("click", sendAiQuestion);
+candidateAiInput.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") sendAiQuestion();
 });

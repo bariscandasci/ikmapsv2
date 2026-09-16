@@ -211,6 +211,23 @@ const NEAREST_STOP_MAX_CANDIDATES = 10;
 const WALK_STEP_MIN_KM = 0.12; // bundan kısa yürümeler ayrı adım olarak gösterilmez (süreye yine de dahil)
 const GRID_CELL_DEG = 0.006; // ~500-650m'lik ızgara hücresi (Ankara enleminde)
 
+// transit_network.json'daki duraklardan ~%37'sinin (3273 enterpolasyon +
+// 528 ekstrapolasyon / 10.940) koordinatı gerçek GPS değil — hattın bilinen
+// iki GERÇEK durağı arasına DÜZ ÇİZGİ ile serpiştirilmiş bir tahmin (ör.
+// "502 KAHRAMANKAZAN-SIHHİYE" hattında Gazi Üniversitesi ile 2008 Sk. arası
+// 17km'lik boşluk düz çizgiyle dolduruluyor). Bu hayalet duraklardan biri
+// tesadüfen Etlik'e, biri hastane girişine denk gelince motor "527-3 (ÖTA)
+// KIZILCAHAMAM-ANKARA" gibi şehirlerarası/seyrek bir hattı adeta kapından
+// geçen bir servis gibi önerdi (Google Maps'in gerçek 261+480 aktarmalı
+// önerisinin çok altında, gerçekçi olmayan bir süreyle) — bkz. proje notları,
+// 2026-09-16. Bu yüzden bu duraklar HEM adrese en yakın biniş/iniş adayı
+// olarak HEM DE başka bir hatta "aktarma" köprüsü kurmak için asla
+// kullanılmıyor (aşağıda buildTransitGraph ve stopsWithinRadius'a bkz.);
+// buna karşın kendi hattı üzerinde ARA istasyon olarak hâlâ geçerliler —
+// gerçek otobüs oradan fiilen geçiyor, sadece o duraktaki tam koordinat
+// belirsiz, bu yüzden hat sürekliliğini bozmuyoruz.
+const UNRELIABLE_COORD_SOURCES = new Set(["enterpolasyon", "ekstrapolasyon"]);
+
 function walkMinutes(km) {
   return (km / WALK_SPEED_KMH) * 60;
 }
@@ -326,6 +343,9 @@ function buildTransitGraph(network, options) {
   const offsets = [-1, 0, 1];
   network.stops.forEach((s) => {
     if (typeof s.lat !== "number") return;
+    // Konumu tahmini bir durak, başka bir hatta "aktarma" köprüsü kurmak
+    // için kullanılamaz — bkz. UNRELIABLE_COORD_SOURCES tanımındaki not.
+    if (UNRELIABLE_COORD_SOURCES.has(s.coordSource)) return;
     const cellLat = Math.floor(s.lat / GRID_CELL_DEG);
     const cellLng = Math.floor(s.lng / GRID_CELL_DEG);
     offsets.forEach((dLat) => {
@@ -335,6 +355,7 @@ function buildTransitGraph(network, options) {
         bucket.forEach((otherId) => {
           if (otherId === s.id) return;
           const other = stopsById.get(otherId);
+          if (UNRELIABLE_COORD_SOURCES.has(other.coordSource)) return;
           const km = haversineKm({ lat: s.lat, lng: s.lng }, { lat: other.lat, lng: other.lng });
           if (km <= WALK_TRANSFER_MAX_KM) {
             addEdge(s.id, otherId, walkMinutes(km), null, "yurume");
@@ -347,8 +368,16 @@ function buildTransitGraph(network, options) {
   return { stopsById, grid, adjacency, linesByLocalId };
 }
 
-/** Bir {lat,lng} noktasının radiusKm çevresindeki gerçek durakları (uzaklığa göre sıralı) döner. */
-function stopsWithinRadius(graph, lat, lng, radiusKm) {
+/**
+ * Bir {lat,lng} noktasının radiusKm çevresindeki gerçek durakları (uzaklığa
+ * göre sıralı) döner. requireReliableCoord=true iken, koordinatı tahmini
+ * (UNRELIABLE_COORD_SOURCES) duraklar adaylıktan tamamen elenir — bir
+ * adres/proje konumunun en yakın biniş/iniş noktası ARANIRKEN bu her zaman
+ * true geçilmeli (findRealRoute/getDijkstraFrom'a bkz.), aksi halde yanlış
+ * konumlu bir hayalet durak "kapının önünde" gibi görünüp gerçekçi olmayan
+ * bir hatta biniyormuş gibi hesaplanabiliyor.
+ */
+function stopsWithinRadius(graph, lat, lng, radiusKm, requireReliableCoord) {
   const cellSpan = Math.ceil(radiusKm / 0.5) + 1;
   const cellLat = Math.floor(lat / GRID_CELL_DEG);
   const cellLng = Math.floor(lng / GRID_CELL_DEG);
@@ -359,6 +388,7 @@ function stopsWithinRadius(graph, lat, lng, radiusKm) {
       if (!bucket) continue;
       bucket.forEach((id) => {
         const s = graph.stopsById.get(id);
+        if (requireReliableCoord && UNRELIABLE_COORD_SOURCES.has(s.coordSource)) return;
         const km = haversineKm({ lat, lng }, { lat: s.lat, lng: s.lng });
         if (km <= radiusKm) results.push({ stop: s, km });
       });
@@ -462,7 +492,7 @@ function getDijkstraFrom(coords, graph = transitGraph) {
   const key = coords.lat.toFixed(4) + "," + coords.lng.toFixed(4);
   const cached = dijkstraCacheByGraph.get(graph);
   if (cached && cached.key === key) return cached.result;
-  const sources = stopsWithinRadius(graph, coords.lat, coords.lng, NEAREST_STOP_SEARCH_KM)
+  const sources = stopsWithinRadius(graph, coords.lat, coords.lng, NEAREST_STOP_SEARCH_KM, true)
     .slice(0, NEAREST_STOP_MAX_CANDIDATES)
     .map(({ stop, km }) => ({ stopId: stop.id, startMinutes: walkMinutes(km) }));
   const result = runDijkstra(graph, sources);
@@ -492,7 +522,7 @@ function findRealRoute(originCoords, destCoords, graph = transitGraph, fixedSide
   const fromCoords = fixedSide === "dest" ? destCoords : originCoords;
   const toCoords = fixedSide === "dest" ? originCoords : destCoords;
   const { prev, keyStopId, bestAtStop, bestStateAtStop } = getDijkstraFrom(fromCoords, graph);
-  const toCandidates = stopsWithinRadius(graph, toCoords.lat, toCoords.lng, NEAREST_STOP_SEARCH_KM).slice(
+  const toCandidates = stopsWithinRadius(graph, toCoords.lat, toCoords.lng, NEAREST_STOP_SEARCH_KM, true).slice(
     0,
     NEAREST_STOP_MAX_CANDIDATES
   );
@@ -692,7 +722,7 @@ function buildDolmusAlternative(origin, dest, originLabel, destLabel, officialMi
 // ---------------------------------------------------------------------------
 
 const TransitCache = {
-  KEY: "ik_ulasim_cache_v22", // v22: en yakın durak arama yarıçapı 1.2km/6->1.8km/10 (seyrek bölgelerde gerçek en hızlı hat artık gözden kaçmıyor)
+  KEY: "ik_ulasim_cache_v23", // v23: koordinatı tahmini (enterpolasyon/ekstrapolasyon) duraklar artık biniş/iniş veya aktarma noktası olarak kullanılmıyor (bkz. UNRELIABLE_COORD_SOURCES)
   _mem: null,
   _load() {
     if (this._mem) return this._mem;
@@ -1304,9 +1334,8 @@ function renderRouteSteps(steps) {
 // 6) UI KATMANI
 // ---------------------------------------------------------------------------
 
-const map = L.map("map", { zoomControl: true }).setView([39.935, 32.82], 10.4);
+const map = L.map("map", { zoomControl: true, attributionControl: false }).setView([39.935, 32.82], 10.4);
 L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
-  attribution: "&copy; OpenStreetMap katkıda bulunanlar",
   maxZoom: 19,
   subdomains: "abc",
 }).addTo(map);
@@ -1488,6 +1517,12 @@ modeButtons.forEach((btn) => {
     // seçim kutusunu (panel-project) kullanır.
     projectPanel.classList.toggle("hidden", currentMode === "origin-to-project");
     clearResults();
+    // "Proje -> Gerçek Adaylar" harita/sidebar yerine tam ekran ayrı bir
+    // görünümde açılır (candidates.js) — 209+ aday cramped bir listeye
+    // sığmıyor, aday detayı da ayrı bir panelde gösterilmesi gerekiyordu.
+    if (typeof toggleCandidateFullscreen === "function") {
+      toggleCandidateFullscreen(currentMode === "project-to-candidates");
+    }
   });
 });
 
@@ -2001,6 +2036,11 @@ function showRouteResult(estimate) {
   }
 
   routeDetail.classList.remove("hidden");
+  // Rota detayı, sonuç listesinin ÜSTÜNDE ama aynı kaydırılabilir alanda
+  // duruyor — kullanıcı listede aşağı kaydırıp bir sonuca tıkladığında,
+  // detay ekranın dışında (yukarıda) kalıp elle geri kaydırmayı gerektiriyordu.
+  // Otomatik kaydırarak bunu ortadan kaldırıyoruz.
+  routeDetail.scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
 // ---------------------------------------------------------------------------
