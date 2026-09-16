@@ -100,6 +100,10 @@ const CandidateStore = {
   all() {
     return this._load();
   },
+  /** resolveCandidateCoords tarafından yeni çözülen konumları diske yazmak için. */
+  save() {
+    this._save();
+  },
   /** newOnes: buildCandidateFromRow() çıktısı dizisi. Dönüş: {added, merged}. */
   upsertBatch(newOnes) {
     const list = this._load();
@@ -317,13 +321,27 @@ function matchDistrictOrNeighborhood(text) {
   return null;
 }
 
+// resolveCandidateCoords bir adayı yeni çözünce true'ya çekilir; ilgili
+// puanlama turu (rankCandidatesForProject/runBatchMatch) bitince bu
+// bayrağa bakıp CandidateStore'u DİSKE YAZAR — böylece bir adayın konumu
+// artık SADECE İLK KEZ (hangi projeye bakılırsa bakılsın, sayfa yeniden
+// yüklense bile) çözülüyor; öncesinde candidate.coords sadece bellekte
+// tutulduğu için her proje değişiminde/yenilemede aynı yüzlerce adaylık
+// geocode maliyeti baştan ödeniyordu.
+let candidateCoordsDirty = false;
+function flushCandidateCoordsIfDirty() {
+  if (!candidateCoordsDirty) return;
+  CandidateStore.save();
+  candidateCoordsDirty = false;
+}
+
 /**
  * Aday konumunu tembel (lazy) olarak çözer: önce bilinen ilçe/mahalle adı
- * eşleşmesi (anında), yoksa Nominatim geocode (ağ isteği, cache'li — bkz.
- * app.js geocodeAddress). Sadece sıralama sırasında, ihtiyaç oldukça
- * çağrılır — yüzlerce adaylık bir Excel'i içe aktarırken hepsini toptan
- * geocode etmeye ÇALIŞMIYORUZ (Nominatim'in kullanım politikası ~1 istek/sn
- * ile sınırlı, büyük bir toplu içe aktarmada anlamsız bir gecikme yaratırdı).
+ * eşleşmesi (anında), yoksa Nominatim geocode (ağ isteği, cache'li ve artık
+ * saniyede ~1 isteğe sınırlı — bkz. app.js geocodeAddress). Sadece sıralama
+ * sırasında, ihtiyaç oldukça çağrılır — yüzlerce adaylık bir Excel'i içe
+ * aktarırken hepsini toptan geocode etmeye ÇALIŞMIYORUZ (kullanıcının hiç
+ * bakmayacağı projeler için bile gereksiz ağ isteği atmamak için).
  */
 async function resolveCandidateCoords(candidate) {
   if (candidate.coords) return candidate.coords;
@@ -333,6 +351,7 @@ async function resolveCandidateCoords(candidate) {
     candidate.neighborhoodId = match.neighborhoodId;
     candidate.coords = match.coords;
     candidate.coordsSource = "ilce-eslesme";
+    candidateCoordsDirty = true;
     return candidate.coords;
   }
   try {
@@ -340,6 +359,7 @@ async function resolveCandidateCoords(candidate) {
     if (geo) {
       candidate.coords = { lat: geo.lat, lng: geo.lng };
       candidate.coordsSource = "geocode";
+      candidateCoordsDirty = true;
       return candidate.coords;
     }
   } catch {
@@ -446,11 +466,22 @@ async function scoreCandidateForProject(candidate, project) {
 }
 
 /** projectId sabit taraf olduğu için getTransitEstimate fixedSide="dest" ile çağrılır (Dijkstra önbelleği isabet eder, bkz. app.js). */
-async function rankCandidatesForProject(projectId) {
+/** onProgress(done, total), her aday puanlaması bitince çağrılır (isteğe bağlı) — uzun sürebilen ilk geocode turunda ilerlemeyi göstermek için. */
+async function rankCandidatesForProject(projectId, onProgress) {
   const project = ANKARA_DATA.projects.find((p) => p.id === projectId);
   if (!project) return [];
   const candidates = CandidateStore.all();
-  const results = await Promise.all(candidates.map((c) => scoreCandidateForProject(c, project)));
+  let done = 0;
+  const results = await Promise.all(
+    candidates.map((c) =>
+      scoreCandidateForProject(c, project).then((r) => {
+        done += 1;
+        if (onProgress) onProgress(done, candidates.length);
+        return r;
+      })
+    )
+  );
+  flushCandidateCoordsIfDirty();
   results.sort((a, b) => {
     if (a.eliminated !== b.eliminated) return a.eliminated ? 1 : -1;
     return (b.total || 0) - (a.total || 0);
@@ -598,7 +629,16 @@ async function renderCandidateFsResults(projectId) {
   candidateFsList.innerHTML = `<div class="text-xs text-slate-400 px-2 py-4">Adaylar puanlanıyor…</div>`;
   candidateFsDetail.innerHTML = `<div class="text-sm text-slate-400">Detayları görmek için soldan bir aday seçin.</div>`;
 
-  const results = await rankCandidatesForProject(projectId);
+  // İlk kez görülen bir adres için konum çözme (Nominatim, ~1 istek/sn ile
+  // sınırlı — bkz. app.js queueGeocodeFetch) yüzlerce adayda birkaç dakika
+  // sürebilir; kullanıcı bunun donma değil ilerleyen bir işlem olduğunu
+  // görsün diye sayaç canlı güncelleniyor. Aynı adaylar bir daha hiç
+  // geocode edilmeyecek (konumları artık diske kalıcı yazılıyor).
+  const onProgress = (done, total) => {
+    if (lastCandidateFsProjectId !== projectId) return;
+    candidateFsCount.textContent = `Puanlanıyor… (${done}/${total})`;
+  };
+  const results = await rankCandidatesForProject(projectId, onProgress);
   // Puanlama sürerken kullanıcı başka bir projeye geçmiş olabilir — o zaman bu eski sonucu ekrana basma.
   if (lastCandidateFsProjectId !== projectId) return;
 
@@ -1464,7 +1504,9 @@ batchMatchRunBtn.addEventListener("click", async () => {
   batchMatchResults.innerHTML = `<div class="text-sm text-slate-400">Adaylar puanlanıyor…</div>`;
 
   try {
-    const { assignmentsByProject, unassigned, projects } = await runBatchMatch(projectIds);
+    const { assignmentsByProject, unassigned, projects } = await runBatchMatch(projectIds, (done, total) => {
+      batchMatchStatus.textContent = `Eşleştiriliyor… (${done}/${total})`;
+    });
     renderBatchMatchResults(assignmentsByProject, unassigned, projects);
     batchMatchStatus.textContent = "";
   } catch {
@@ -1481,17 +1523,28 @@ batchMatchRunBtn.addEventListener("click", async () => {
  * dosya başındaki not) ama O(n·m log(n·m)) karmaşıklığıyla yüzlerce aday ×
  * birkaç proje için anında çalışır.
  */
-async function runBatchMatch(projectIds) {
+async function runBatchMatch(projectIds, onProgress) {
   const projects = projectIds.map((id) => ANKARA_DATA.projects.find((p) => p.id === id)).filter(Boolean);
   const candidates = CandidateStore.all();
 
   const allTriples = [];
+  let done = 0;
+  const total = candidates.length * projects.length;
   for (const project of projects) {
-    const results = await Promise.all(candidates.map((c) => scoreCandidateForProject(c, project)));
+    const results = await Promise.all(
+      candidates.map((c) =>
+        scoreCandidateForProject(c, project).then((r) => {
+          done += 1;
+          if (onProgress) onProgress(done, total);
+          return r;
+        })
+      )
+    );
     results.forEach((result) => {
       if (!result.eliminated) allTriples.push({ project, result });
     });
   }
+  flushCandidateCoordsIfDirty();
   allTriples.sort((a, b) => b.result.total - a.result.total);
 
   const capacityLeft = new Map(projects.map((p) => [p.id, projectCapacity(p)]));

@@ -901,6 +901,23 @@ function writeJsonCache(key, obj) {
 const GEOCODE_CACHE_KEY = "ik_ulasim_geocode_cache_v1";
 const DISCOVERY_CACHE_KEY = "ik_ulasim_discovery_cache_v3"; // v3: KNOWN_STOP_NAME_INDEX genişletildi (yeni gerçek duraklar), önbellek sıfırlandı
 
+// Nominatim'in kullanım politikası saniyede en fazla ~1 isteğe izin veriyor.
+// Eski hâlde bu SADECE bir yorum satırıydı — gerçek kod, yüzlerce adaylık bir
+// Excel'in ilk kez puanlanması sırasında (rankCandidatesForProject/
+// runBatchMatch) Promise.all ile TÜM geocode isteklerini aynı anda ateşliyordu.
+// Bu hem politikayı ihliyor hem de Nominatim'in bir kısmını sessizce
+// reddetmesine (ve o adayların "konum belirlenemedi" diye yanlışlıkla
+// elenmesine) yol açabiliyordu. Şimdi tüm geocode istekleri TEK bir kuyruktan,
+// aralarında en az GEOCODE_MIN_INTERVAL_MS ile geçiyor — kaynak kaç eşzamanlı
+// scoreCandidateForProject çağrısı yapılırsa yapılsın.
+const GEOCODE_MIN_INTERVAL_MS = 1100;
+let geocodeQueueTail = Promise.resolve();
+function queueGeocodeFetch(url) {
+  const runNow = geocodeQueueTail.then(() => fetch(url, { headers: { Accept: "application/json" } }));
+  geocodeQueueTail = runNow.catch(() => {}).then(() => new Promise((resolve) => setTimeout(resolve, GEOCODE_MIN_INTERVAL_MS)));
+  return runNow;
+}
+
 /** Serbest metin bir adresi/semt adını Ankara sınırlarıyla sınırlı şekilde koordinata çevirir (OSM Nominatim). */
 async function geocodeAddress(query) {
   const cache = readJsonCache(GEOCODE_CACHE_KEY);
@@ -910,7 +927,7 @@ async function geocodeAddress(query) {
   const url = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(
     query + ", Ankara, Türkiye"
   )}&viewbox=32.35,40.25,33.15,39.55&bounded=1&limit=1&countrycodes=tr`;
-  const res = await fetch(url, { headers: { Accept: "application/json" } });
+  const res = await queueGeocodeFetch(url);
   if (!res.ok) throw new Error("Nominatim isteği başarısız");
   const data = await res.json();
   if (!data.length) return null;

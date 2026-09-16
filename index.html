@@ -155,12 +155,14 @@
   <!-- SOL PANEL -->
   <aside class="w-[400px] shrink-0 flex flex-col border-r border-slate-200 bg-white" style="background-image: url('assets/tepe-logo.png'); background-size: 220px auto; background-position: center 60%; background-repeat: no-repeat;">
 
-    <header class="px-5 pt-3 pb-2 border-b border-slate-100 flex items-start justify-between gap-2">
-      <div class="min-w-0">
-        <h1 class="text-base font-bold text-slate-800">Ulaşım &amp; Proje Eşleştirme</h1>
-        <p class="text-[11px] text-slate-500 mt-0.5">İK saha personeli işe alım — Ankara toplu taşıma modülü</p>
-      </div>
-      <div class="shrink-0 flex flex-col gap-1">
+    <header class="px-5 pt-3 pb-2 border-b border-slate-100">
+      <h1 class="text-base font-bold text-slate-800">Ulaşım &amp; Proje Eşleştirme</h1>
+      <p class="text-[11px] text-slate-500 mt-0.5">İK saha personeli işe alım — Ankara toplu taşıma modülü</p>
+      <!-- Önceden sağda dikey bir sütun olarak 5 buton üst üste diziliyordu
+           (~180px yükseklik) ve altındaki sonuç listesine neredeyse hiç yer
+           kalmıyordu, kısa ekranlarda özellikle. Tam genişlikte satır satır
+           sarılan bir düzene çevirince aynı butonlar ~2 satıra sığıyor. -->
+      <div class="flex flex-wrap gap-1.5 mt-2">
         <button id="urgentBtn" class="text-[11px] font-bold px-2.5 py-1.5 rounded-lg bg-red-600 hover:bg-red-700 text-white transition whitespace-nowrap">🔥 Acil Projeler</button>
         <button id="inactiveBtn" class="text-[11px] font-bold px-2.5 py-1.5 rounded-lg bg-slate-700 hover:bg-slate-800 text-white transition whitespace-nowrap">🔧 Proje Aç/Kapa</button>
         <button id="addProjectBtn" class="text-[11px] font-bold px-2.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white transition whitespace-nowrap">➕ Proje Ekle</button>
@@ -169,7 +171,7 @@
       </div>
     </header>
 
-    <div class="px-5 pt-2 pb-2 border-b border-slate-100">
+    <div class="px-5 pt-1.5 pb-1.5 border-b border-slate-100">
       <div class="flex gap-2 bg-slate-100 p-1 rounded-lg">
         <button class="mode-btn mode-btn-active" data-mode="origin-to-project">Aday → Proje</button>
         <button class="mode-btn" data-mode="project-to-origin">Proje → Aday Havuzu</button>
@@ -177,7 +179,7 @@
       </div>
     </div>
 
-    <div class="px-5 py-2 border-b border-slate-100 space-y-2">
+    <div class="px-5 py-1.5 border-b border-slate-100 space-y-1.5">
 
       <div id="panel-origin">
         <label class="text-xs font-semibold text-slate-600">Adayın İlçesi / Mahallesi</label>
@@ -185,7 +187,7 @@
           <option value="">Seçiniz…</option>
         </select>
 
-        <label class="text-xs font-semibold text-slate-600 block mt-2">veya Adres / Semt Ara (ör. "Etlik Şehir Hastanesi")</label>
+        <label class="text-xs font-semibold text-slate-600 block mt-1.5">veya Adres / Semt Ara (ör. "Etlik Şehir Hastanesi")</label>
         <div class="flex gap-1.5 mt-1">
           <input id="addressInput" type="text" placeholder="Adres, semt veya işletme adı…" class="flex-1 min-w-0 border border-slate-200 rounded-lg px-3 py-1.5 text-sm text-slate-700 bg-white" />
           <button id="addressSearchBtn" class="shrink-0 px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-semibold transition">Bul</button>
@@ -210,7 +212,7 @@
         </div>
       </div>
 
-      <div class="mt-2">
+      <div>
         <label class="text-xs font-semibold text-slate-600 block mb-1">Pozisyon Filtresi</label>
         <div class="flex flex-wrap gap-1.5">
           <button class="threshold-btn position-btn threshold-btn-active" data-position="all">Tümü</button>
@@ -507,7 +509,7 @@
 </div>
 
 <script src="data.js?v=56"></script>
-<script src="app.js?v=63"></script>
-<script src="candidates.js?v=13"></script>
+<script src="app.js?v=64"></script>
+<script src="candidates.js?v=14"></script>
 </body>
 </html>
