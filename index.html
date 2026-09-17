@@ -179,51 +179,9 @@
       </div>
     </div>
 
-    <div class="px-5 py-1.5 border-b border-slate-100 space-y-1.5">
-
-      <div id="panel-origin">
-        <label class="text-xs font-semibold text-slate-600">Adayın İlçesi / Mahallesi</label>
-        <select id="originSelect" class="mt-1 w-full border border-slate-200 rounded-lg px-3 py-1.5 text-sm text-slate-700 bg-white">
-          <option value="">Seçiniz…</option>
-        </select>
-
-        <label class="text-xs font-semibold text-slate-600 block mt-1.5">veya Adres / Semt Ara (ör. "Etlik Şehir Hastanesi")</label>
-        <div class="flex gap-1.5 mt-1">
-          <input id="addressInput" type="text" placeholder="Adres, semt veya işletme adı…" class="flex-1 min-w-0 border border-slate-200 rounded-lg px-3 py-1.5 text-sm text-slate-700 bg-white" />
-          <button id="addressSearchBtn" class="shrink-0 px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-semibold transition">Bul</button>
-        </div>
-        <div id="addressStatus" class="text-[11px] text-slate-400 mt-1 leading-snug"></div>
-      </div>
-
-      <div id="panel-project" class="hidden">
-        <label class="text-xs font-semibold text-slate-600">Açık Proje</label>
-        <select id="projectSelect" class="mt-1 w-full border border-slate-200 rounded-lg px-3 py-1.5 text-sm text-slate-700 bg-white">
-          <option value="">Seçiniz…</option>
-        </select>
-      </div>
-
-      <div>
-        <label class="text-xs font-semibold text-slate-600 block mb-1">Süre Filtresi</label>
-        <div class="flex flex-wrap gap-1.5">
-          <button class="threshold-btn threshold-btn-active" data-threshold="all">Tümü</button>
-          <button class="threshold-btn" data-threshold="30">≤ 30 dk</button>
-          <button class="threshold-btn" data-threshold="45">≤ 45 dk</button>
-          <button class="threshold-btn" data-threshold="60">≤ 60 dk</button>
-        </div>
-      </div>
-
-      <div>
-        <label class="text-xs font-semibold text-slate-600 block mb-1">Pozisyon Filtresi</label>
-        <div class="flex flex-wrap gap-1.5">
-          <button class="threshold-btn position-btn threshold-btn-active" data-position="all">Tümü</button>
-          <button class="threshold-btn position-btn" data-position="Şeflik">Şeflik</button>
-          <button class="threshold-btn position-btn" data-position="Temizlik Görevlisi">Temizlik Görevlisi</button>
-          <button class="threshold-btn position-btn" data-position="Servis">Servis</button>
-        </div>
-      </div>
-    </div>
-
-    <!-- Kaydırılabilir sonuç bölgesi: üstteki seçim kontrolleri sabit kalır -->
+    <!-- Kaydırılabilir sonuç bölgesi: aday/proje seçimi + filtreler artık
+         haritanın üstündeki çubukta (bkz. #topToolbar) — burada sadece
+         sonuç listesine daha fazla yer kalsın diye taşındı. -->
     <div class="flex-1 overflow-y-auto min-h-0">
 
       <!-- YAKINDAKİ GERÇEK HATLAR (canlı Overpass keşfi) — varsayılan daraltılmış -->
@@ -262,10 +220,62 @@
 
   </aside>
 
-  <!-- HARİTA -->
-  <main class="flex-1 relative bg-slate-100">
-    <div id="mapWrap">
-      <div id="map"></div>
+  <!-- HARİTA + ÜST ARAÇ ÇUBUĞU -->
+  <main class="flex-1 flex flex-col bg-slate-100 min-w-0">
+    <!-- Aday/proje seçimi + süre/pozisyon filtreleri — önceden sol panelde
+         dikey dizilip sonuç listesine neredeyse hiç yer bırakmıyordu; burada
+         haritanın üstünde yatay bir çubuk olarak, sol paneli sonuçlar için
+         boşaltıyor. -->
+    <div id="topToolbar" class="shrink-0 flex flex-wrap items-end gap-x-5 gap-y-2 px-5 py-2.5 bg-white border-b border-slate-200">
+      <div id="panel-origin" class="flex flex-wrap items-end gap-x-4 gap-y-2">
+        <div>
+          <label class="text-xs font-semibold text-slate-600 block mb-1">Adayın İlçesi / Mahallesi</label>
+          <select id="originSelect" class="w-56 border border-slate-200 rounded-lg px-3 py-1.5 text-sm text-slate-700 bg-white">
+            <option value="">Seçiniz…</option>
+          </select>
+        </div>
+        <div>
+          <label class="text-xs font-semibold text-slate-600 block mb-1">veya Adres / Semt Ara (ör. "Etlik Şehir Hastanesi")</label>
+          <div class="flex gap-1.5">
+            <input id="addressInput" type="text" placeholder="Adres, semt veya işletme adı…" class="w-64 border border-slate-200 rounded-lg px-3 py-1.5 text-sm text-slate-700 bg-white" />
+            <button id="addressSearchBtn" class="shrink-0 px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-semibold transition">Bul</button>
+          </div>
+        </div>
+        <div id="addressStatus" class="text-[11px] text-slate-400 leading-snug basis-full"></div>
+      </div>
+
+      <div id="panel-project" class="hidden">
+        <label class="text-xs font-semibold text-slate-600 block mb-1">Açık Proje</label>
+        <select id="projectSelect" class="w-72 border border-slate-200 rounded-lg px-3 py-1.5 text-sm text-slate-700 bg-white">
+          <option value="">Seçiniz…</option>
+        </select>
+      </div>
+
+      <div>
+        <label class="text-xs font-semibold text-slate-600 block mb-1">Süre Filtresi</label>
+        <div class="flex flex-wrap gap-1.5">
+          <button class="threshold-btn threshold-btn-active" data-threshold="all">Tümü</button>
+          <button class="threshold-btn" data-threshold="30">≤ 30 dk</button>
+          <button class="threshold-btn" data-threshold="45">≤ 45 dk</button>
+          <button class="threshold-btn" data-threshold="60">≤ 60 dk</button>
+        </div>
+      </div>
+
+      <div>
+        <label class="text-xs font-semibold text-slate-600 block mb-1">Pozisyon Filtresi</label>
+        <div class="flex flex-wrap gap-1.5">
+          <button class="threshold-btn position-btn threshold-btn-active" data-position="all">Tümü</button>
+          <button class="threshold-btn position-btn" data-position="Şeflik">Şeflik</button>
+          <button class="threshold-btn position-btn" data-position="Temizlik Görevlisi">Temizlik Görevlisi</button>
+          <button class="threshold-btn position-btn" data-position="Servis">Servis</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="flex-1 relative min-h-0">
+      <div id="mapWrap">
+        <div id="map"></div>
+      </div>
     </div>
   </main>
 </div>
