@@ -206,7 +206,15 @@ const WALK_TRANSFER_MAX_KM = 0.35; // farklı hatların yakın duraklarını "ak
 // arama mesafesiyle) o durağa 24 dk'lık gerçek bir yürüyüş öneriyordu.
 // 1.8km/10 adaya çıkarınca aynı örnekte süre 109 dk'dan 85 dk'ya düşüp
 // Google'ın en iyi seçeneğiyle (84 dk) örtüştü — bkz. proje notları.
-const NEAREST_STOP_SEARCH_KM = 1.8; // bir nokta çevresinde graf'a giriş/çıkış için aranan yarıçap
+//
+// 2.0km'ye tekrar genişletildi (2026-09-17): koordinatı tahmini duraklar
+// artık aday olamadığından (bkz. UNRELIABLE_COORD_SOURCES), Pursaklar'ın
+// kendi durağı 1.8km sınırının hemen dışında (1.85km) kalan tek GERÇEK
+// durağa (SARAY DOĞAN DURAĞI) hiç ulaşamıyor, "Yerel hat (doğrulanamadı)"
+// güvenlik ağına düşüyordu. Tüm ilçe/mahalle/proje noktaları tarandı —
+// Pursaklar dışında en uzak nokta 1.34km'de, yani 2.0km başka bir yeri
+// etkilemiyor (bkz. proje notları).
+const NEAREST_STOP_SEARCH_KM = 2.0; // bir nokta çevresinde graf'a giriş/çıkış için aranan yarıçap
 const NEAREST_STOP_MAX_CANDIDATES = 10;
 const WALK_STEP_MIN_KM = 0.12; // bundan kısa yürümeler ayrı adım olarak gösterilmez (süreye yine de dahil)
 const GRID_CELL_DEG = 0.006; // ~500-650m'lik ızgara hücresi (Ankara enleminde)
@@ -805,7 +813,7 @@ function buildMinTransfersAlternative(origin, dest, originLabel, destLabel, prim
 // ---------------------------------------------------------------------------
 
 const TransitCache = {
-  KEY: "ik_ulasim_cache_v24", // v24: koordinatı tahmini (enterpolasyon/ekstrapolasyon) duraklar artık biniş/iniş veya aktarma noktası olarak kullanılmıyor (bkz. UNRELIABLE_COORD_SOURCES); ayrıca minTransfersAlternative ("En Az Aktarmalı" seçeneği) eklendi — eski kayıtlarda bu alan yok
+  KEY: "ik_ulasim_cache_v25", // v25: en yakın durak arama yarıçapı 1.8km->2.0km (Pursaklar, güvenilir koordinat filtresi yüzünden 1.8km sınırının hemen dışında kalıp "doğrulanamadı"ya düşüyordu)
   _mem: null,
   _load() {
     if (this._mem) return this._mem;
