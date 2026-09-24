@@ -1434,15 +1434,15 @@ const MODE_ICON = { metro: "🚇", ankaray: "🚊", tren: "🚆", otobus: "🚌"
 // ayırt edici renklerinde kaldı (çok modlu bir rotada hangi bacağın hangi
 // araç olduğunu ayırt etmek için hâlâ gerekli).
 const MODE_LINE_COLOR = { metro: "#dc2626", ankaray: "#16a34a", tren: "#7c3aed", otobus: "#1a73e8", dolmus: "#f59e0b", hub: "#64748b" };
-// Yürüyüş bacakları, hangi modun rotasında geçiyor olursa olsun HER ZAMAN bu
-// tek (otobüsünkine yakın ama tonca farklı) maviyle noktalı çizilir (bkz.
-// drawRoute) — Google Haritalar'da olduğu gibi "bu kısımda yürüyeceksin"
-// hiçbir zaman bir otobüs/metro rengiyle karışmasın diye; buna karşın hâlâ
-// "mavi ailesinde" kalıp Google'ın kendi yürüyüş noktalarına benziyor. Solid
-// otobüs çizgisinden ayrımı asıl NOKTALI/ince/halosuz stil sağlıyor (bkz.
-// drawSegment), renk sadece ikinci bir ipucu. MODE_LINE_COLOR.hub bunun için
-// kullanılmıyor artık, o sadece ikon/etiket renklerinde referans olarak kalıyor.
-const WALK_LINE_COLOR = "#4285f4";
+// Yürüyüş bacakları HER ZAMAN otobüsle AYNI maviyle çizilir — Google
+// Haritalar'ın kendisi de yürüyüş ve otobüs bacaklarında aynı tek maviyi
+// kullanır, ikisini NOKTALI/katı çizgi + kalınlık + halo farkıyla ayırt
+// eder, renk farkıyla değil (bkz. drawRoute/drawSegment: "walk" noktalı+
+// ince+halosuz, "solid" katı+kalın+halolu). Kullanıcı 2026-09-24'te iki
+// farklı mavi tonunun ("otobüsünkine yakın ama farklı") kafa karıştırdığını,
+// Google'daki gibi TEK renk olması gerektiğini belirtti. MODE_LINE_COLOR.hub
+// artık hiçbir yerde kullanılmıyor, sadece tarihsel referans olarak kaldı.
+const WALK_LINE_COLOR = MODE_LINE_COLOR.otobus;
 
 /**
  * estimate.steps dizisinden, "hangi hatta binip nerede inecek" şeklinde
@@ -2096,6 +2096,49 @@ function interpolateCoords(a, b, t) {
 // dümdüz bir çizgi gerçek rota gibi katı çizilip yanıltıyordu.
 const REAL_GEOMETRY_CONNECT_LIMIT_KM = 0.15;
 
+// "Bineceği/ineceği durağa kadarki güzergah" seçimi (nearestPointIndex ile iki
+// çapaya en yakın geometri noktaları arasını dilimlemek) bazı hatlarda TÜM
+// hattı, hatta anlamsız yüzlerce km'yi çiziyordu (2026-09-24 denetimi: 1554
+// bacağın 176'sı, %11). İki ayrı kök neden bulundu: (1) bazı hatların
+// transit_network_geometry.json'daki şekli GERÇEKTEN bozuk/kopuk — ör. "159-5
+// (ÖTA) ŞEREFLİKOÇHİSAR-ANKARA" şehirlerarası hattının şekli iki ayrı, 120+
+// km'lik sıçramayla birbirine dikilmiş, tek dilim 426 km çiziyordu; (2) bazı
+// hatlar (ör. 175, 110 — Bilkent-Beytepe döngüsü) gerçekten uzun/döngülü ve
+// aynı bölgeden iki kez geçiyor, bu yüzden "en yakın nokta" biniş/iniş için
+// döngünün YANLIŞ (uzak) geçişini eşleştirip aradaki koca döngüyü diliyordu.
+// Her iki durumda da ortak, güvenilir bir belirti var: dilimlenen alt-dizinin
+// İÇİNDE, ardışık iki geometri noktası arasında GERÇEKÇİ OLMAYAN büyük bir
+// sıçrama oluyor (gerçek bir yol/GPS izinde ardışık şekil noktaları birkaç
+// yüz metre arayla gelir, asla 3+ km sıçramaz). Bilinen DOĞRU rotalarda
+// (Etlik→Medical Park, 261-6/480 — Google ile doğrulanmış) dilim içi en
+// büyük sıçrama 0.74/0.36 km; denetimdeki 176 "kötü" bacağın 171'i de zaten
+// yüksek çizilen/kuş-uçuşu oranına sahipti, yanlış pozitif ~1 vakaydı. Bu
+// yüzden dilim içinde bu eşiği aşan bir sıçrama bulunursa, o geometriye
+// GÜVENİLMEZ — dürüst bir kesikli/tahmini bağlantıya (bkz. "fallback" kind)
+// düşülür, TÜM hat ya da yanlış bir döngü asla katı çizgiyle gösterilmez.
+const MAX_GEOMETRY_JUMP_KM = 3;
+function maxJumpKm(latlngs) {
+  let m = 0;
+  for (let i = 1; i < latlngs.length; i++) {
+    const j = haversineKm({ lat: latlngs[i - 1][0], lng: latlngs[i - 1][1] }, { lat: latlngs[i][0], lng: latlngs[i][1] });
+    if (j > m) m = j;
+  }
+  return m;
+}
+// Sıçrama kontrolü, veri BOZUK olduğunda (159-5 gibi) veya hat gerçekten iki
+// noktayı görünmez bir dikişle birbirine bağladığında yakalıyor; ama bazı
+// UZUN/DÖNGÜLÜ hatlarda (ör. 586) tek bir büyük sıçrama olmadan da "en yakın
+// nokta" biniş/iniş çapasını hattın TAMAMEN YANLIŞ (fiziksel olarak yakın ama
+// dizi içinde çok uzak) bir geçişiyle eşleştirip koca döngüyü diliyor —
+// gerçek biniş yalnızca 0.1-1.4km iken çizilen 22-33km gibi. Bu yüzden ikinci,
+// tamamlayıcı bir güvenlik ağı daha var: dilim, iki çapa arası düz mesafenin
+// (crowKm) MAX_GEOMETRY_RATIO katından fazlaysa yine güvenilmez sayılır.
+// Katsayı, bilinen DOĞRU rotanın (Etlik→Medical Park 261-6, oranı 6.2) asla
+// yanlışlıkla elenmeyeceği ama denetimdeki bozuk 586 örneğinin (oranı 24)
+// yakalanacağı şekilde (8x) seçildi; küçük mutlak mesafelerde (ör. crowKm
+// 0.1km) oranın aşırı katı olmaması için 2km'lik bir taban da var.
+const MAX_GEOMETRY_RATIO = 8;
+
 // Yürüyüş bacakları eskiden iki nokta arası DÜZ çizgiyle ("kuş uçuşu")
 // çiziliyordu — kullanıcı haklı olarak "yürüyen kişi binaların üstünden mi
 // atlayacak" diye sordu. transit_network.json'da yaya kaldırım/patika verisi
@@ -2244,8 +2287,13 @@ function drawRoute(originCoords, row, bucket, destCoordsOverride) {
       const lo = Math.min(i1, i2);
       const hi = Math.max(i1, i2);
       const seg = geometry.slice(lo, hi + 1).map(([lat, lng]) => [lat, lng]);
+      const segKm = seg.length > 1 ? polylineKm(seg) : 0;
+      const segTrusted =
+        seg.length > 1 &&
+        maxJumpKm(seg) <= MAX_GEOMETRY_JUMP_KM &&
+        segKm <= Math.max(haversineKm(startA, endA) * MAX_GEOMETRY_RATIO, 2);
 
-      if (seg.length > 1) {
+      if (segTrusted) {
         const segStart = { lat: seg[0][0], lng: seg[0][1] };
         const segEnd = { lat: seg[seg.length - 1][0], lng: seg[seg.length - 1][1] };
         const startIsNearSegStart = haversineKm(startA, segStart) <= haversineKm(startA, segEnd);
@@ -2254,7 +2302,7 @@ function drawRoute(originCoords, row, bucket, destCoordsOverride) {
 
         // Gerçek güzergah her zaman katı çizgiyle çizilir.
         drawSegment(seg, "solid");
-        stepKm = polylineKm(seg);
+        stepKm = segKm;
         midLatLng = seg[Math.floor(seg.length / 2)];
         // Gerçek hat, bacağın asıl uçlarına (durak/proje konumu) tam ulaşmıyorsa
         // aradaki fark ince kesikli bir "son adım" çizgisiyle tamamlanır.
@@ -2266,7 +2314,9 @@ function drawRoute(originCoords, row, bucket, destCoordsOverride) {
         }
       } else {
         // Gerçek geometri bu bacak için kullanılamadı (uçlar hattın tamamen
-        // aynı noktasına denk düştü) — dürüstçe kesikli/tahmini göster.
+        // aynı noktasına denk düştü) YA DA dilim güvenilmez bulundu (bkz.
+        // MAX_GEOMETRY_JUMP_KM) — dürüstçe kesikli/tahmini göster, TÜM hattı
+        // ya da yanlış bir döngüyü katı çizgiyle göstermektense.
         drawSegment([[startA.lat, startA.lng], [endA.lat, endA.lng]], isWalk ? "walk" : "fallback");
         stepKm = haversineKm(startA, endA);
         midLatLng = [(startA.lat + endA.lat) / 2, (startA.lng + endA.lng) / 2];
