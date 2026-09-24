@@ -2130,10 +2130,26 @@ function drawRoute(originCoords, row, bucket, destCoordsOverride) {
     const tooltipText = `${MODE_ICON[step.mode] || ""} ${step.line}`;
 
     const drawSegment = (latlngs, dashed) => {
+      // Google Maps tarzı "halo": renkli çizginin altına biraz daha kalın
+      // beyaz bir kontur çizgisi eklenir. Bunsuz, aynı modun (ör. iki farklı
+      // otobüs hattının) üst üste/yakın geçtiği yerlerde (Bilkent-Beytepe
+      // gibi) çizgiler alttaki harita çizgileriyle karışıp tek bir "yumak"
+      // gibi görünüyordu. Kesikli (dashed) bacaklar zaten kasıtlı olarak
+      // ince/soluk gösterilen tahmini bağlantılar olduğu için halo almaz.
+      if (!dashed) {
+        L.polyline(latlngs, {
+          color: "#ffffff",
+          weight: 9,
+          opacity: 0.9,
+          lineJoin: "round",
+          lineCap: "round",
+          interactive: false,
+        }).addTo(routesLayer);
+      }
       const poly = L.polyline(latlngs, {
         color: modeColor,
         weight: dashed ? 3 : 5,
-        opacity: dashed ? 0.6 : 0.9,
+        opacity: dashed ? 0.7 : 1,
         dashArray: dashed ? "2 8" : null,
         lineJoin: "round",
         lineCap: "round",
