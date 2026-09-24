@@ -184,8 +184,23 @@ function roundTo5(n) {
 // hattı tam kullanan metro rotası bulunabiliyordu ama toplamda tüm-otobüs
 // alternatifiyle neredeyse berabere kalıyordu). Metro/Ankaray hızı, raylı
 // sistemin trafikten bağımsız olmasını yansıtacak şekilde hafif yükseltildi.
-const MODE_SPEED_KMH = { otobus: 16, metro: 33, ankaray: 33, tren: 45, dolmus: 20 };
+//
+// 2026-09-24: otobüs 16→20 km/s, sefer sıklığı 15→12 dk. Pursaklar→Nazende
+// Google'da 93-102 dk iken uygulama 139 dk gösteriyordu (yürüme sadece ~9 dk);
+// 16 km/s + durak başına 0.4 dk bekleme, durak duruşlarını fiilen iki kez
+// sayıyordu. 20 km/s eskiden Gölbaşı örneğinde Google'la (84 dk) örtüşmüştü;
+// metro hızı sonradan 33'e çıkarıldığı için "otobüs metroyla yapay başa baş"
+// itirazı artık geçerli değil (Etlik→Bilkent Center hâlâ metro tabanlı, Etlik→
+// Medical Park hâlâ 261→480 — doğrulandı). Pursaklar→Nazende 139→120 dk.
+const MODE_SPEED_KMH = { otobus: 20, metro: 33, ankaray: 33, tren: 45, dolmus: 20 };
 const WALK_SPEED_KMH = 4.5;
+// Yürüme, rota SEÇİLİRKEN 1.5x "ağır" sayılır (gösterilen süre yine gerçek
+// yürüme süresidir). Yürüme düz çizgiyle 4.5 km/s hesaplandığı için gerçek
+// sokak yürüyüşü aslında biraz daha uzun; ceza olmadan motor birkaç dakika
+// kazandırmak için 20+ dk'lık yürüyüşleri seçebiliyordu. 513 ilçe→proje
+// çiftinde denendi (2026-09-24): 1.5x → 20 dk üzeri yürüyüş 99→47 çift,
+// ortalama süre neredeyse aynı; 2x ve üstü toplam süreyi kötüleştiriyor.
+const WALK_PENALTY_FACTOR = 1.5;
 const STOP_DWELL_MIN = 0.4;
 // Sabit bir "aktarma cezası" yerine, her araca binişte (ilk biniş DAHİL,
 // sadece aktarmalarda değil) o modun ortalama sefer sıklığının yarısı kadar
@@ -194,10 +209,22 @@ const STOP_DWELL_MIN = 0.4;
 // kullanıldı; otobüs/metro/Ankaray için Ankara'da bilinen tipik sefer
 // sıklıklarına dayalı makul ortalamalar. Aynı hatta kalmaya devam etmek
 // (biniş değişmiyorsa) hâlâ tamamen bedava.
-const MODE_HEADWAY_MIN = { otobus: 15, metro: 6, ankaray: 6, tren: 15, dolmus: 10 };
+const MODE_HEADWAY_MIN = { otobus: 12, metro: 6, ankaray: 6, tren: 15, dolmus: 10 };
 function avgWaitMin(mode) {
   return (MODE_HEADWAY_MIN[mode] !== undefined ? MODE_HEADWAY_MIN[mode] : MODE_HEADWAY_MIN.otobus) / 2;
 }
+// 2026-09-24: ego.gov.tr'den 657 otobüs hattının TAMAMININ gerçek hafta içi
+// kalkış saatleri çekilip hat-bazlı ortalama bekleme süresi denendi (bkz.
+// scratchpad line_schedules.json/scrape_ego.py, projeye alınmadı). Veri
+// doğruydu (ör. 236-2 hattı günde gerçekten 7 kez, 130 hattı 2 dk'da bir
+// geçiyor) ama rota SEÇİMİNE sokulunca 13 Google karşılaştırmasında ortalama
+// mutlak hata 14.3→21.5 dk'ya çıktı: motor zaten (Etimesgut/533 gibi) yakın
+// duraklarının koordinatı UNRELIABLE_COORD_SOURCES yüzünden tahmini olduğu
+// için doğru hattı hiç aday olarak göremiyordu; düz 6dk bekleme bu seçim
+// hatasını gizliyordu, gerçek bekleme (236-2 için 45dk tavan) onu görünür
+// hale getirip süreyi daha da kötüleştirdi. Kök neden hat sıklığı değil,
+// aday durak filtresi — bkz. proje notları. Bu yüzden geri alındı; tekrar
+// denenecekse önce o filtre düzeltilmeli.
 const WALK_TRANSFER_MAX_KM = 0.35; // farklı hatların yakın duraklarını "aktarma" olarak bağlayan yürüme kenarları
 // 1.2km/6 aday, Gölbaşı/Mogan Gölü gibi seyrek bölgelerde gerçek en iyi
 // hattı kaçırıyordu: Google Maps'in önerdiği daha hızlı hatların bindiği
@@ -449,14 +476,15 @@ function runDijkstra(graph, sources, transferPenaltyMin = 0) {
     }
   }
 
-  sources.forEach(({ stopId, startMinutes }) => {
+  sources.forEach(({ stopId, startMinutes, realStart }) => {
+    const realStartMinutes = realStart === undefined ? startMinutes : realStart;
     const key = stopId + "|" + NONE;
     if (!dist.has(key) || dist.get(key) > startMinutes) {
       dist.set(key, startMinutes);
-      realDist.set(key, startMinutes);
+      realDist.set(key, realStartMinutes);
       keyStopId.set(key, stopId);
       heap.push({ stopId, lineKey: NONE, minutes: startMinutes });
-      relaxBestAtStop(stopId, key, startMinutes, startMinutes);
+      relaxBestAtStop(stopId, key, startMinutes, realStartMinutes);
     }
   });
 
@@ -487,7 +515,7 @@ function runDijkstra(graph, sources, transferPenaltyMin = 0) {
         newLineKey = NONE;
       }
       const penalty = boarding ? transferPenaltyMin : 0;
-      const newMinutes = cur.minutes + e.minutes + waitCost + penalty;
+      const newMinutes = cur.minutes + e.minutes * (e.lineId ? 1 : WALK_PENALTY_FACTOR) + waitCost + penalty;
       const newRealMinutes = curRealMinutes + e.minutes + waitCost;
       const newKey = e.to + "|" + newLineKey;
       const known = dist.get(newKey);
@@ -529,7 +557,7 @@ function getDijkstraFrom(coords, graph = transitGraph, transferPenaltyMin = 0) {
   if (cached && cached.key === key) return cached.result;
   const sources = stopsWithinRadius(graph, coords.lat, coords.lng, NEAREST_STOP_SEARCH_KM, true)
     .slice(0, NEAREST_STOP_MAX_CANDIDATES)
-    .map(({ stop, km }) => ({ stopId: stop.id, startMinutes: walkMinutes(km) }));
+    .map(({ stop, km }) => ({ stopId: stop.id, startMinutes: walkMinutes(km) * WALK_PENALTY_FACTOR, realStart: walkMinutes(km) }));
   const result = runDijkstra(graph, sources, transferPenaltyMin);
   variants.set(variant, { key, result });
   return result;
@@ -571,7 +599,7 @@ function findRealRoute(originCoords, destCoords, graph = transitGraph, fixedSide
     const d = bestAtStop.get(stop.id);
     if (d === undefined) return;
     const walk = walkMinutes(km);
-    const total = d + walk; // sıralama için kullanılan (cezalı olabilir) toplam
+    const total = d + walk * WALK_PENALTY_FACTOR; // sıralama için kullanılan (cezalı olabilir) toplam
     if (!best || total < best.total) {
       best = { total, stopId: stop.id, realTotal: bestRealMinutesAtStop.get(stop.id) + walk };
     }
@@ -813,7 +841,7 @@ function buildMinTransfersAlternative(origin, dest, originLabel, destLabel, prim
 // ---------------------------------------------------------------------------
 
 const TransitCache = {
-  KEY: "ik_ulasim_cache_v25", // v25: en yakın durak arama yarıçapı 1.8km->2.0km (Pursaklar, güvenilir koordinat filtresi yüzünden 1.8km sınırının hemen dışında kalıp "doğrulanamadı"ya düşüyordu)
+  KEY: "ik_ulasim_cache_v27", // v27: otobüs hızı 16->20 km/s, sefer 15->12 dk (süreler Google'a yaklaştırıldı). v26: yürüme cezası 1.5x (WALK_PENALTY_FACTOR) rota seçimini değiştirdi. v25: en yakın durak arama yarıçapı 1.8km->2.0km (Pursaklar, güvenilir koordinat filtresi yüzünden 1.8km sınırının hemen dışında kalıp "doğrulanamadı"ya düşüyordu)
   _mem: null,
   _load() {
     if (this._mem) return this._mem;

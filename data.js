@@ -96,9 +96,9 @@ const ANKARA_DATA = {
       ],
     },
     {
-      id: "pursaklar", name: "Pursaklar", lat: 40.0700, lng: 32.9000, accessStopId: "stop_pursaklar_est",
+      id: "pursaklar", name: "Pursaklar", lat: 40.0355, lng: 32.9040, accessStopId: "stop_pursaklar_est",
       neighborhoods: [
-        { id: "pursaklar_merkez", name: "Pursaklar Merkez", lat: 40.0700, lng: 32.9000, accessStopId: "stop_pursaklar_est" },
+        { id: "pursaklar_merkez", name: "Pursaklar Merkez", lat: 40.0355, lng: 32.9040, accessStopId: "stop_pursaklar_est" },
       ],
     },
   ],
