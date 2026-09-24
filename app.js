@@ -682,9 +682,20 @@ function pathToSteps(pathStopIds, edgeAtStop, graph) {
         to: toName,
         verified: line ? line.verified !== false : true,
         lineId: s._lineId,
+        fromStopId: s.fromStopId,
+        toStopId: s.toStopId,
       };
     }
-    return { mode: "hub", line: "Yürüyüş", from: fromName, to: toName, verified: true, lineId: null };
+    return {
+      mode: "hub",
+      line: "Yürüyüş",
+      from: fromName,
+      to: toName,
+      verified: true,
+      lineId: null,
+      fromStopId: s.fromStopId,
+      toStopId: s.toStopId,
+    };
   });
 }
 
@@ -2221,13 +2232,29 @@ function drawRoute(originCoords, row, bucket, destCoordsOverride) {
 
   // Her bacağın başlangıç/bitiş "çapa" koordinatını belirle: ardışık iki
   // hattın geometrisi varsa, gerçek aktarma noktası bu iki hattın birbirine
-  // en yakın olduğu nokta olarak hesaplanır.
+  // en yakın olduğu nokta olarak hesaplanır. İKİSİNDE de geometri yoksa —
+  // ör. otobüs (geometrili) → yürüyüş (geometrisiz) → metro (geometrili)
+  // gibi bir zincirde ortadaki yürüyüş bacağı — eskiden origin/dest arasını
+  // adım sayısına bölen kaba bir orantılı ("1/3, 2/3...") interpolasyona
+  // düşülüyordu; bu, rota panelinde "yürüme mesafesinde" denen GERÇEKTE
+  // birkaç yüz metrelik bir aktarmayı haritada birkaç km'lik uydurma bir
+  // bacak gibi gösteriyordu (2026-09-24, kullanıcı raporu — Aktepe→Medical
+  // Park örneğinde 3 bacağın da ~4.2km çıkması, tam da düz mesafenin üçe
+  // bölünmesiyle örtüşüyordu). pathToSteps artık her adımın GERÇEK sınır
+  // durağının id'sini de taşıyor (steps[i].toStopId === steps[i+1].fromStopId,
+  // aynı fiziksel durak) — bu yüzden interpolasyondan ÖNCE o durağın gerçek
+  // koordinatı denenir; sadece durak verisi hiç yoksa (olmamalı ama) kaba
+  // interpolasyona düşülür.
   const anchors = [originCoords];
   for (let i = 0; i < steps.length - 1; i++) {
     const gA = geometryOfStep(steps[i]);
     const gB = geometryOfStep(steps[i + 1]);
+    const boundaryStopId = steps[i].toStopId || steps[i + 1].fromStopId;
+    const boundaryStop = boundaryStopId && transitGraph && transitGraph.stopsById.get(boundaryStopId);
     if (gA && gB) {
       anchors.push(nearestPairBetweenGeometries(gA, gB));
+    } else if (boundaryStop && typeof boundaryStop.lat === "number") {
+      anchors.push({ lat: boundaryStop.lat, lng: boundaryStop.lng });
     } else {
       anchors.push(interpolateCoords(originCoords, destCoords, (i + 1) / steps.length));
     }
