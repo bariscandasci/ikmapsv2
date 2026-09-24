@@ -161,6 +161,15 @@ function haversineKm(a, b) {
   return 2 * R * Math.asin(Math.sqrt(h));
 }
 
+/** [lat,lng] noktalarından oluşan bir çizginin toplam uzunluğu (km) — drawRoute'ta bacak etiketleri için. */
+function polylineKm(latlngs) {
+  let km = 0;
+  for (let i = 1; i < latlngs.length; i++) {
+    km += haversineKm({ lat: latlngs[i - 1][0], lng: latlngs[i - 1][1] }, { lat: latlngs[i][0], lng: latlngs[i][1] });
+  }
+  return km;
+}
+
 function roundTo5(n) {
   return Math.round(n / 5) * 5;
 }
@@ -1421,6 +1430,12 @@ const MODE_ICON = { metro: "🚇", ankaray: "🚊", tren: "🚆", otobus: "🚌"
 // Haritada bacak başına renk: gerçek dünyadaki Ankara toplu taşıma renklerine
 // yakın bir palet (M4 turuncu/sarı, Ankaray yeşil, Başkentray mor, otobüs teal).
 const MODE_LINE_COLOR = { metro: "#dc2626", ankaray: "#16a34a", tren: "#7c3aed", otobus: "#0d9488", dolmus: "#f59e0b", hub: "#64748b" };
+// Yürüyüş bacakları, hangi modun rotasında geçiyor olursa olsun HER ZAMAN bu
+// tek mavi renkle noktalı çizilir (bkz. drawRoute) — Google Maps'te olduğu
+// gibi "bu kısımda yürüyeceksin" hiçbir zaman bir otobüs/metro rengiyle
+// karışmasın diye. MODE_LINE_COLOR.hub bunun İÇİN kullanılmıyor artık, o
+// sadece ikon/etiket renklerinde referans olarak kalıyor.
+const WALK_LINE_COLOR = "#2563eb";
 
 /**
  * estimate.steps dizisinden, "hangi hatta binip nerede inecek" şeklinde
@@ -2126,17 +2141,22 @@ function drawRoute(originCoords, row, bucket, destCoordsOverride) {
     const startA = anchors[i];
     const endA = anchors[i + 1];
     const geometry = geometryOfStep(step);
+    const isWalk = step.mode === "hub";
     const modeColor = MODE_LINE_COLOR[step.mode] || bucket.color;
     const tooltipText = `${MODE_ICON[step.mode] || ""} ${step.line}`;
+    let stepKm = 0; // etikette gösterilecek yaklaşık bacak uzunluğu (gerçek geometri varsa ondan, yoksa düz mesafeden)
+    let midLatLng = null; // etiket baloncuğunun konacağı orta nokta
 
-    const drawSegment = (latlngs, dashed) => {
-      // Google Maps tarzı "halo": renkli çizginin altına biraz daha kalın
-      // beyaz bir kontur çizgisi eklenir. Bunsuz, aynı modun (ör. iki farklı
-      // otobüs hattının) üst üste/yakın geçtiği yerlerde (Bilkent-Beytepe
-      // gibi) çizgiler alttaki harita çizgileriyle karışıp tek bir "yumak"
-      // gibi görünüyordu. Kesikli (dashed) bacaklar zaten kasıtlı olarak
-      // ince/soluk gösterilen tahmini bağlantılar olduğu için halo almaz.
-      if (!dashed) {
+    // kind: "solid" (gerçek güzergah, halo'lu) | "walk" (yürüyüş, noktalı mavi,
+    // halo'suz) | "fallback" (bu bacak için gerçek geometri yok, modun kendi
+    // renginde ince kesikli — hâlâ o modun bir bacağı, sadece tahmini çizilir).
+    const drawSegment = (latlngs, kind) => {
+      if (kind === "solid") {
+        // Google Maps tarzı "halo": renkli çizginin altına biraz daha kalın
+        // beyaz bir kontur çizgisi eklenir. Bunsuz, aynı modun (ör. iki farklı
+        // otobüs hattının) üst üste/yakın geçtiği yerlerde (Bilkent-Beytepe
+        // gibi) çizgiler alttaki harita çizgileriyle karışıp tek bir "yumak"
+        // gibi görünüyordu.
         L.polyline(latlngs, {
           color: "#ffffff",
           weight: 9,
@@ -2147,10 +2167,13 @@ function drawRoute(originCoords, row, bucket, destCoordsOverride) {
         }).addTo(routesLayer);
       }
       const poly = L.polyline(latlngs, {
-        color: modeColor,
-        weight: dashed ? 3 : 5,
-        opacity: dashed ? 0.7 : 1,
-        dashArray: dashed ? "2 8" : null,
+        color: kind === "walk" ? WALK_LINE_COLOR : modeColor,
+        weight: kind === "solid" ? 5 : kind === "walk" ? 4 : 3,
+        opacity: kind === "solid" ? 1 : kind === "walk" ? 0.85 : 0.7,
+        // Yürüyüş, Google'daki gibi yuvarlak noktalarla çizilir (lineCap
+        // "round" + kısa dash aralığı bunu üretiyor) — otobüs/metroyla asla
+        // karıştırılmasın diye HER YERDE aynı (mavi, noktalı) stil.
+        dashArray: kind === "walk" ? "1 10" : kind === "fallback" ? "2 8" : null,
         lineJoin: "round",
         lineCap: "round",
       }).addTo(routesLayer);
@@ -2173,22 +2196,45 @@ function drawRoute(originCoords, row, bucket, destCoordsOverride) {
         const nearEnd = startIsNearSegStart ? segEnd : segStart;
 
         // Gerçek güzergah her zaman katı çizgiyle çizilir.
-        drawSegment(seg, false);
+        drawSegment(seg, "solid");
+        stepKm = polylineKm(seg);
+        midLatLng = seg[Math.floor(seg.length / 2)];
         // Gerçek hat, bacağın asıl uçlarına (durak/proje konumu) tam ulaşmıyorsa
         // aradaki fark ince kesikli bir "son adım" çizgisiyle tamamlanır.
         if (haversineKm(startA, nearStart) > REAL_GEOMETRY_CONNECT_LIMIT_KM) {
-          drawSegment([[startA.lat, startA.lng], [nearStart.lat, nearStart.lng]], true);
+          drawSegment([[startA.lat, startA.lng], [nearStart.lat, nearStart.lng]], isWalk ? "walk" : "fallback");
         }
         if (haversineKm(endA, nearEnd) > REAL_GEOMETRY_CONNECT_LIMIT_KM) {
-          drawSegment([[nearEnd.lat, nearEnd.lng], [endA.lat, endA.lng]], true);
+          drawSegment([[nearEnd.lat, nearEnd.lng], [endA.lat, endA.lng]], isWalk ? "walk" : "fallback");
         }
       } else {
         // Gerçek geometri bu bacak için kullanılamadı (uçlar hattın tamamen
         // aynı noktasına denk düştü) — dürüstçe kesikli/tahmini göster.
-        drawSegment([[startA.lat, startA.lng], [endA.lat, endA.lng]], true);
+        drawSegment([[startA.lat, startA.lng], [endA.lat, endA.lng]], isWalk ? "walk" : "fallback");
+        stepKm = haversineKm(startA, endA);
+        midLatLng = [(startA.lat + endA.lat) / 2, (startA.lng + endA.lng) / 2];
       }
     } else {
-      drawSegment([[startA.lat, startA.lng], [endA.lat, endA.lng]], true);
+      drawSegment([[startA.lat, startA.lng], [endA.lat, endA.lng]], isWalk ? "walk" : "fallback");
+      stepKm = haversineKm(startA, endA);
+      midLatLng = [(startA.lat + endA.lat) / 2, (startA.lng + endA.lng) / 2];
+    }
+
+    // Google Maps'teki gibi her bacağın ortasına küçük bir süre (yürüyüş için
+    // ayrıca mesafe) baloncuğu: yürüyen kısımla araca binilen kısmı çizginin
+    // kalınlığına/rengine bakmadan da anında ayırt ettirir.
+    if (midLatLng && stepKm > 0.02) {
+      const minutes = isWalk ? walkMinutes(stepKm) : (stepKm / (MODE_SPEED_KMH[step.mode] || MODE_SPEED_KMH.otobus)) * 60;
+      const minText = `${Math.max(1, Math.round(minutes))} dk`;
+      const distText = stepKm < 1 ? `${Math.round(stepKm * 1000)} m` : `${stepKm.toFixed(1)} km`;
+      const labelHtml = isWalk
+        ? `<span class="route-leg-label route-leg-label-walk">🚶 ${minText} · ${distText}</span>`
+        : `<span class="route-leg-label">${MODE_ICON[step.mode] || ""} ${minText}</span>`;
+      L.marker(midLatLng, {
+        icon: L.divIcon({ className: "", html: labelHtml, iconSize: [1, 1], iconAnchor: [0, 0] }),
+        interactive: false,
+        keyboard: false,
+      }).addTo(routesLayer);
     }
   });
 

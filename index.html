@@ -140,6 +140,17 @@
     box-shadow: 0 2px 6px rgba(79,70,229,.5);
   }
 
+  /* drawRoute()'un çizdiği bacak etiketleri (Google Maps'teki "8 dk., 500 m"
+     baloncukları gibi) — yürüyüş ile araca binilen kısmı, çizginin
+     kalınlığına/rengine bakmaya gerek kalmadan anında ayırt ettirir. */
+  .route-leg-label {
+    display: inline-block; transform: translate(-50%, -50%); white-space: nowrap;
+    background: white; border: 1px solid #cbd5e1; border-radius: 999px;
+    padding: 2px 7px; font-size: 11px; font-weight: 700; color: #1e293b;
+    box-shadow: 0 1px 4px rgba(15, 23, 42, 0.28);
+  }
+  .route-leg-label-walk { color: #1d4ed8; border-color: #bfdbfe; }
+
   .urgent-modal-row {
     display: flex; align-items: flex-start; gap: 0.5rem; font-size: 0.78rem;
     color: #334155; padding: 0.35rem 0.4rem; border-radius: 0.4rem; cursor: pointer;
@@ -519,7 +530,7 @@
 </div>
 
 <script src="data.js?v=57"></script>
-<script src="app.js?v=68"></script>
+<script src="app.js?v=69"></script>
 <script src="candidates.js?v=14"></script>
 </body>
 </html>
