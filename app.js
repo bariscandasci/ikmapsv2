@@ -1454,6 +1454,11 @@ const MODE_LINE_COLOR = { metro: "#dc2626", ankaray: "#16a34a", tren: "#7c3aed",
 // Google'daki gibi TEK renk olması gerektiğini belirtti. MODE_LINE_COLOR.hub
 // artık hiçbir yerde kullanılmıyor, sadece tarihsel referans olarak kaldı.
 const WALK_LINE_COLOR = MODE_LINE_COLOR.otobus;
+// "fallback" bacaklar (gerçek güzergahı bilinmeyen/güvenilmez bulunan bir
+// otobüs/metro parçası, düz çizgiyle tahmin edilir) MODE_LINE_COLOR.hub'ın
+// nötr grisini kullanır — WALK_LINE_COLOR ile (ya da herhangi bir modun
+// kendi rengiyle) KARIŞMASIN diye kasıtlı olarak canlı bir renk değil.
+const FALLBACK_LINE_COLOR = MODE_LINE_COLOR.hub;
 
 /**
  * estimate.steps dizisinden, "hangi hatta binip nerede inecek" şeklinde
@@ -2293,13 +2298,23 @@ function drawRoute(originCoords, row, bucket, destCoordsOverride) {
         }).addTo(routesLayer);
       }
       const poly = L.polyline(latlngs, {
-        color: kind === "walk" ? WALK_LINE_COLOR : modeColor,
+        // "fallback" (bu bacak için güvenilir gerçek geometri YOK — ya hiç
+        // yok ya da MAX_GEOMETRY_JUMP_KM/RATIO tarafından reddedildi) kasıtlı
+        // olarak modeColor DEĞİL, nötr bir gri kullanır. 2026-09-25'e kadar
+        // modeColor kullanıyordu — otobüs rengi yürüyüşle aynı maviye
+        // çevrildiğinden (bkz. WALK_LINE_COLOR notu), "gerçekten yürüyeceğin
+        // kısa bir mesafe" ile "gerçek güzergahı bilinmeyen, düz çizgiyle
+        // tahmin edilmiş 10 km'lik bir otobüs bacağı" ARTIK AYNI RENKTE
+        // görünüyordu (kullanıcı raporu: Pursaklar→REC Adliye'de 459 hattının
+        // hiç geometrisi yok, 10km'lik düz mavi çizgi yürüyüş sanılıyordu).
+        // Gri, "bu kısmın gerçek güzergahı belirsiz/tahmini" anlamını taşıyor.
+        color: kind === "walk" ? WALK_LINE_COLOR : kind === "solid" ? modeColor : FALLBACK_LINE_COLOR,
         weight: kind === "solid" ? 5 : kind === "walk" ? 4 : 3,
-        opacity: kind === "solid" ? 1 : kind === "walk" ? 0.85 : 0.7,
-        // Yürüyüş, Google'daki gibi yuvarlak noktalarla çizilir (lineCap
-        // "round" + kısa dash aralığı bunu üretiyor) — otobüs/metroyla asla
-        // karıştırılmasın diye HER YERDE aynı (mavi, noktalı) stil.
-        dashArray: kind === "walk" ? "1 10" : kind === "fallback" ? "2 8" : null,
+        opacity: kind === "solid" ? 1 : kind === "walk" ? 0.85 : 0.75,
+        // Yürüyüş yuvarlak küçük noktalarla (Google'daki gibi); belirsiz
+        // otobüs/metro bacağı daha uzun, "taslak" hissi veren kesik çizgiyle
+        // — ikisi asla aynı görünmesin diye deseni de renk kadar farklı.
+        dashArray: kind === "walk" ? "1 10" : kind === "fallback" ? "6 7" : null,
         lineJoin: "round",
         lineCap: "round",
       }).addTo(routesLayer);
