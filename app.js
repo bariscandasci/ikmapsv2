@@ -2179,6 +2179,17 @@ const UNRELIABLE_LINE_SEGMENTS = new Set([
   // aralarında 8 nokta var) — "en yakın nokta" eşleşmesi rotayı AVM'nin
   // içinden geçiyormuş gibi çiziyor (kullanıcı raporu, ekran görüntüsüyle).
   "ego_line_208-4|ego_20875|ego_22303",
+  // 207 İVEDİK METRO-KARDEŞLER: bu 27 duraklı döngü hattının 71 noktalık
+  // ham şekli tek bir düzgün tur değil — aynı "İVEDİK METRO" bölgesini
+  // (~32.811-32.818 boylam arası) doğu-batı-doğu diye üç kez zikzaklayarak
+  // geçen birden fazla sefer varyantı art arda eklenmiş gibi duruyor. Biniş
+  // (25. durak, "İVEDİK METRO" — ilk 0. duraktan FARKLI bir geçiş) ile iniş
+  // (26./son durak, "AHMET REFİK CD.") aslında dizinin SONUNA yakın olmalı,
+  // ama "en yakın nokta" eşleşmesi ikisini de dizinin BAŞINDAKİ (index 2 ve
+  // 10) yanlış zikzak parçasına kilitliyor — MAX_GEOMETRY_JUMP_KM/RATIO'yu
+  // geçecek kadar küçük adımlarla (2026-09-25, kullanıcı raporu: 207 bacağı
+  // binaların üzerinden düz çiziliyor).
+  "ego_line_207|ego_21139|ego_22303",
 ]);
 function isUnreliableLineSegment(step) {
   return Boolean(
