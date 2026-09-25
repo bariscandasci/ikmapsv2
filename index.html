@@ -36,6 +36,14 @@
     width: 16px; height: 16px; border-radius: 50%;
     border: 2px solid white; box-shadow: 0 1px 4px rgba(0,0,0,.35);
   }
+  /* Google Haritalar tarzı sade kırmızı konum pini — sadece drawRoute()'un
+     hedef marker'ı için (aynı damla şekli, .pin-project ile paylaşılıyor,
+     sadece renk kırmızı ve animasyon yok). */
+  .pin-dest-flag {
+    width: 26px; height: 26px; border-radius: 50% 50% 50% 0;
+    background: #ea4335; transform: rotate(-45deg);
+    border: 2px solid white; box-shadow: 0 1px 4px rgba(0,0,0,.4);
+  }
 
   .mode-btn {
     flex: 1; padding: 0.55rem 0.5rem; font-size: 0.8rem; font-weight: 600;
@@ -519,7 +527,7 @@
 </div>
 
 <script src="data.js?v=57"></script>
-<script src="app.js?v=76"></script>
+<script src="app.js?v=77"></script>
 <script src="candidates.js?v=14"></script>
 </body>
 </html>

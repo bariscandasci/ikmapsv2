@@ -1447,7 +1447,11 @@ const MODE_ICON = { metro: "🚇", ankaray: "🚊", tren: "🚆", otobus: "🚌"
 // kaybolmuyor — sol paneldeki adım listesi ve haritadaki hover tooltip'i
 // (bkz. drawSegment'teki tooltipText) bunu zaten MODE_ICON ile gösteriyor;
 // sadece çizgi renginden ayırt etmek gerekmiyor artık.
-const TRANSIT_LINE_COLOR = "#1a73e8";
+// 2026-09-25 (ikinci geçiş): kullanıcı Google Haritalar'ın kendi ekran
+// görüntülerine bakıp rengin #1a73e8 (genel Google marka mavisi) değil,
+// TOPLU TAŞIMA rotalarında gerçekte kullanılan daha koyu laciverte
+// (#1a56db) çekilmesini istedi.
+const TRANSIT_LINE_COLOR = "#1a56db";
 const WALK_LINE_COLOR = TRANSIT_LINE_COLOR;
 // "fallback" bacaklar (gerçek güzergahı bilinmeyen/güvenilmez bulunan bir
 // otobüs/metro parçası — ya hiç geometri yok ya da MAX_GEOMETRY_JUMP_KM/RATIO
@@ -2372,16 +2376,19 @@ function drawRoute(originCoords, row, bucket, destCoordsOverride) {
           interactive: false,
         }).addTo(routesLayer);
       }
-      // Üç bacak türü de (solid/walk/fallback) ARTIK AYNI TEK mavide
+      // Üç bacak türü de (solid/walk/fallback) ARTIK AYNI TEK lacivertte
       // (TRANSIT_LINE_COLOR) — ayrımı renk değil, katılık/kalınlık/kesik
-      // deseni sağlıyor: solid = katı+kalın+halo'lu; walk = küçük sık
-      // noktalar ("2 8"); fallback = daha uzun, belirgin kesikler ("6 6"),
-      // eskisi gibi harita zemininde kaybolan soluk bir gri DEĞİL.
+      // deseni sağlıyor: solid = katı+kalın+halo'lu; fallback = daha uzun,
+      // belirgin kesikler ("6 6"), eskisi gibi harita zemininde kaybolan
+      // soluk bir gri DEĞİL. Yürüyüş ise kesikli bir ÇİZGİ değil, Google
+      // Haritalar'daki gibi YUVARLAK BONCUK DİZİSİ: dashArray'in ilk değeri
+      // 0 (çizili kısım sıfır uzunlukta) + lineCap "round" birleşince, her
+      // "dash" aslında weight kadar çaplı tam bir daireye dönüşüyor.
       const poly = L.polyline(latlngs, {
         color: kind === "walk" ? WALK_LINE_COLOR : kind === "solid" ? TRANSIT_LINE_COLOR : FALLBACK_LINE_COLOR,
-        weight: kind === "solid" ? 5 : kind === "walk" ? 4 : 4,
+        weight: kind === "solid" ? 5 : kind === "walk" ? 6 : 4,
         opacity: kind === "solid" ? 1 : kind === "walk" ? 0.9 : 0.9,
-        dashArray: kind === "walk" ? "2 8" : kind === "fallback" ? "6 6" : null,
+        dashArray: kind === "walk" ? "0 12" : kind === "fallback" ? "6 6" : null,
         lineJoin: "round",
         lineCap: "round",
       }).addTo(routesLayer);
@@ -2459,14 +2466,34 @@ function drawRoute(originCoords, row, bucket, destCoordsOverride) {
     }
   });
 
+  // Aktarma noktaları (bir bacağın bittiği/diğerinin başladığı her sınır —
+  // anchors[1..length-2], yani başlangıç ve hedefin KENDİSİ hariç) Google
+  // Haritalar tarzı içi beyaz, kenarı lacivert küçük halkalarla işaretlenir.
+  for (let i = 1; i < anchors.length - 1; i++) {
+    L.circleMarker([anchors[i].lat, anchors[i].lng], {
+      radius: 5,
+      color: TRANSIT_LINE_COLOR,
+      weight: 3,
+      fillColor: "#ffffff",
+      fillOpacity: 1,
+    }).addTo(routesLayer);
+  }
+
   // Arka plan pinleri gizlendiği için (bkz. setBackgroundMarkersVisible),
   // bu rotanın kendi başlangıç ve hedef noktaları ayrıca işaretlenir —
-  // aksi halde harita tamamen "çıplak" kalırdı.
-  L.marker([originCoords.lat, originCoords.lng], { icon: districtIcon("#1e293b") })
+  // aksi halde harita tamamen "çıplak" kalırdı. Başlangıç, aktarma
+  // halkalarıyla AYNI sade halka/nokta stili; hedef ise Google'daki gibi
+  // sade kırmızı bir konum pini (aday/proje/ilçe rengine bakılmaksızın).
+  L.circleMarker([originCoords.lat, originCoords.lng], {
+    radius: 6,
+    color: TRANSIT_LINE_COLOR,
+    weight: 3,
+    fillColor: "#ffffff",
+    fillOpacity: 1,
+  })
     .bindTooltip("Başlangıç", { direction: "top" })
     .addTo(routesLayer);
-  const destIsUrgent = row.project && URGENT_PROJECT_IDS.has(row.project.id);
-  const destIcon = row.project ? (destIsUrgent ? urgentProjectIcon : projectIcon) : districtIcon(bucket.color);
+  const destIcon = L.divIcon({ className: "", html: `<div class="pin pin-dest-flag"></div>`, iconSize: [26, 26], iconAnchor: [13, 26] });
   const destLabel = row.project ? row.project.name : row.district ? row.district.name : "Hedef";
   L.marker([destCoords.lat, destCoords.lng], { icon: destIcon }).bindTooltip(destLabel, { direction: "top" }).addTo(routesLayer);
 
