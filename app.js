@@ -2155,6 +2155,40 @@ function maxJumpKm(latlngs) {
 // 0.1km) oranın aşırı katı olmaması için 2km'lik bir taban da var.
 const MAX_GEOMETRY_RATIO = 8;
 
+// MAX_GEOMETRY_JUMP_KM/MAX_GEOMETRY_RATIO tek tek büyük sıçramaları ya da
+// aşırı toplam oranı yakalıyor; ama bazı hatların ham geometrisi, biniş-iniş
+// arasında BİRİKİMLİ küçük adımlarla aynı bölgeyi birkaç kez dolaşıyor (tek
+// bir sıçrama 3km'yi hiç geçmiyor, toplam oran 8x'in altında kalıyor) — bu
+// ikisi de o yüzden yakalayamıyor. 2026-09-25'te genel eşleştirme
+// algoritmasını (nearestPointIndex'i durak sırasına/gerçek km oranına göre
+// yönlendirme) düzeltmek için ÜÇ farklı yöntem denendi; üçü de bu spesifik
+// örneği (208-4, Antares AVM civarı — rota AVM'nin içinden geçiyormuş gibi
+// çiziliyordu) bir miktar düzeltirken, bu oturumda Google Haritalar'la
+// doğrulanmış referans rotayı (Etlik→Medical Park, 261-6) bozdu (segment
+// uzunluğu 0-1.6km arasına çöktü, olması gerekenin çok altında). Genel
+// algoritmayı değiştirmenin regresyon riski, tek bir bilinen-bozuk örneği
+// düzeltmenin faydasından ağır bastığı için o yol terk edildi (ayrıntı proje
+// notlarında). Bunun yerine EN DAR kapsamlı çözüm: sadece BURADA, elle,
+// kullanıcı tarafından doğrulanmış (hat, biniş durağı, iniş durağı) üçlüleri
+// listele — bu tam üçlüye denk gelindiğinde geometriye hiç güvenilmez,
+// doğrudan dürüst gri/kesikli "fallback" stiline düşülür. Başka HİÇBİR
+// rotayı etkilemez (genel algoritma, guard'lar aynı kalıyor).
+const UNRELIABLE_LINE_SEGMENTS = new Set([
+  // 208-4 İVEDİK METRO-KURTİNİ: Antares AVM/Konutları civarında ham geometri
+  // aynı bölgeyi birkaç kez dolaşıyor (iki nokta neredeyse aynı koordinatta,
+  // aralarında 8 nokta var) — "en yakın nokta" eşleşmesi rotayı AVM'nin
+  // içinden geçiyormuş gibi çiziyor (kullanıcı raporu, ekran görüntüsüyle).
+  "ego_line_208-4|ego_20875|ego_22303",
+]);
+function isUnreliableLineSegment(step) {
+  return Boolean(
+    step.lineId &&
+      step.fromStopId &&
+      step.toStopId &&
+      UNRELIABLE_LINE_SEGMENTS.has(`${step.lineId}|${step.fromStopId}|${step.toStopId}`)
+  );
+}
+
 // Yürüyüş bacakları eskiden iki nokta arası DÜZ çizgiyle ("kuş uçuşu")
 // çiziliyordu — kullanıcı haklı olarak "yürüyen kişi binaların üstünden mi
 // atlayacak" diye sordu. transit_network.json'da yaya kaldırım/patika verisi
@@ -2331,6 +2365,7 @@ function drawRoute(originCoords, row, bucket, destCoordsOverride) {
       const seg = geometry.slice(lo, hi + 1).map(([lat, lng]) => [lat, lng]);
       const segKm = seg.length > 1 ? polylineKm(seg) : 0;
       const segTrusted =
+        !isUnreliableLineSegment(step) &&
         seg.length > 1 &&
         maxJumpKm(seg) <= MAX_GEOMETRY_JUMP_KM &&
         segKm <= Math.max(haversineKm(startA, endA) * MAX_GEOMETRY_RATIO, 2);
