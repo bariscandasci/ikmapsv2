@@ -1438,27 +1438,26 @@ function durationBucket(min) {
 }
 
 const MODE_ICON = { metro: "🚇", ankaray: "🚊", tren: "🚆", otobus: "🚌", dolmus: "🚐", hub: "📍" };
-// Haritada bacak başına renk. Otobüs (rotaların büyük çoğunluğu) 2026-09-24'e
-// kadar teal'di (#0d9488) — kullanıcı bunun "yeşile çaldığını", Google
-// Haritalar'daki gibi net MAVİ olması gerektiğini belirtti; Google'ın kendi
-// rota mavisine (#1a73e8) çevrildi. Metro/Ankaray/Başkentray/dolmuş kendi
-// ayırt edici renklerinde kaldı (çok modlu bir rotada hangi bacağın hangi
-// araç olduğunu ayırt etmek için hâlâ gerekli).
-const MODE_LINE_COLOR = { metro: "#dc2626", ankaray: "#16a34a", tren: "#7c3aed", otobus: "#1a73e8", dolmus: "#f59e0b", hub: "#64748b" };
-// Yürüyüş bacakları HER ZAMAN otobüsle AYNI maviyle çizilir — Google
-// Haritalar'ın kendisi de yürüyüş ve otobüs bacaklarında aynı tek maviyi
-// kullanır, ikisini NOKTALI/katı çizgi + kalınlık + halo farkıyla ayırt
-// eder, renk farkıyla değil (bkz. drawRoute/drawSegment: "walk" noktalı+
-// ince+halosuz, "solid" katı+kalın+halolu). Kullanıcı 2026-09-24'te iki
-// farklı mavi tonunun ("otobüsünkine yakın ama farklı") kafa karıştırdığını,
-// Google'daki gibi TEK renk olması gerektiğini belirtti. MODE_LINE_COLOR.hub
-// artık hiçbir yerde kullanılmıyor, sadece tarihsel referans olarak kaldı.
-const WALK_LINE_COLOR = MODE_LINE_COLOR.otobus;
+// 2026-09-25: harita çizim rengi TEK bir kurumsal Google Haritalar mavisine
+// (#1a73e8) indirgendi — otobüs/metro/Ankaray/Başkentray FARK ETMEKSİZİN.
+// Önceki sürüm modlara göre ayrı renk veriyordu (metro kırmızı, Ankaray
+// yeşil, tren mor); kullanıcı bunun "karmaşık renk paleti" olduğunu, Google
+// Haritalar'ın tek maviyle gidip modu SADECE ikon/etiketle (durak paneli,
+// tooltip) ayırt ettiğini belirtti. Hangi bacağın hangi hat/mod olduğu hâlâ
+// kaybolmuyor — sol paneldeki adım listesi ve haritadaki hover tooltip'i
+// (bkz. drawSegment'teki tooltipText) bunu zaten MODE_ICON ile gösteriyor;
+// sadece çizgi renginden ayırt etmek gerekmiyor artık.
+const TRANSIT_LINE_COLOR = "#1a73e8";
+const WALK_LINE_COLOR = TRANSIT_LINE_COLOR;
 // "fallback" bacaklar (gerçek güzergahı bilinmeyen/güvenilmez bulunan bir
-// otobüs/metro parçası, düz çizgiyle tahmin edilir) MODE_LINE_COLOR.hub'ın
-// nötr grisini kullanır — WALK_LINE_COLOR ile (ya da herhangi bir modun
-// kendi rengiyle) KARIŞMASIN diye kasıtlı olarak canlı bir renk değil.
-const FALLBACK_LINE_COLOR = MODE_LINE_COLOR.hub;
+// otobüs/metro parçası — ya hiç geometri yok ya da MAX_GEOMETRY_JUMP_KM/RATIO
+// tarafından reddedildi) 2026-09-24'te nötr gri kullanıyordu (yürüyüşle
+// karışmasın diye); 2026-09-25'te kullanıcı bunun harita zemininde "soluk"
+// kaybolduğunu belirtip TEK mavi renk kuralına geri döndürülmesini istedi.
+// Artık fallback da aynı mavi — ayrımı renk değil, BELİRGİN farklı bir
+// kesikli desen (dashArray, bkz. drawSegment) sağlıyor: yürüyüş küçük sık
+// noktalar ("2 8"), fallback daha uzun "taslak" çizgiler ("6 6").
+const FALLBACK_LINE_COLOR = TRANSIT_LINE_COLOR;
 
 /**
  * estimate.steps dizisinden, "hangi hatta binip nerede inecek" şeklinde
@@ -1893,6 +1892,7 @@ function clearResults() {
   resultsHeading.textContent = "";
   nearbyLinesPanel.classList.add("hidden");
   resetDistrictMarkers();
+  setBackgroundMarkersVisible(true);
 }
 
 const districtMarkersById = {};
@@ -2213,15 +2213,14 @@ function isUnreliableLineSegment(step) {
 // arası tekrar tekrar istenmesin diye); istek başarısız olursa (çevrimdışı,
 // zaman aşımı, sunucu kısıtlaması) sessizce düz çizgide kalınır — bu bir
 // güvenlik ağı, uygulamanın çalışması buna bağımlı değil.
-const walkGeometryCache = new Map();
-function fetchWalkGeometry(a, b) {
+function fetchOsrmGeometry(profileUrlSegment, cache, a, b) {
   const key = `${a.lat.toFixed(5)},${a.lng.toFixed(5)}|${b.lat.toFixed(5)},${b.lng.toFixed(5)}`;
-  if (walkGeometryCache.has(key)) return walkGeometryCache.get(key);
+  if (cache.has(key)) return cache.get(key);
   const promise = (async () => {
     try {
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 6000);
-      const url = `https://routing.openstreetmap.de/routed-foot/route/v1/foot/${a.lng},${a.lat};${b.lng},${b.lat}?overview=full&geometries=geojson`;
+      const url = `https://routing.openstreetmap.de/${profileUrlSegment}/${a.lng},${a.lat};${b.lng},${b.lat}?overview=full&geometries=geojson`;
       const res = await fetch(url, { signal: controller.signal });
       clearTimeout(timeout);
       if (!res.ok) return null;
@@ -2234,8 +2233,24 @@ function fetchWalkGeometry(a, b) {
       return null;
     }
   })();
-  walkGeometryCache.set(key, promise);
+  cache.set(key, promise);
   return promise;
+}
+const walkGeometryCache = new Map();
+function fetchWalkGeometry(a, b) {
+  return fetchOsrmGeometry("routed-foot/route/v1/foot", walkGeometryCache, a, b);
+}
+// Gerçek geometrisi olmayan/güvenilmez bulunan otobüs-metro bacakları eskiden
+// iki durak arası düz "kuş uçuşu" çizgiyle (binaların üstünden) tahmin
+// ediliyordu — kullanıcı raporu, 207 hattının fallback'e düşen bacağı için.
+// Yürüyüşteki AYNI mantık burada da uygulanıyor, sadece araç profili
+// (routed-car) ile: aracın gerçekte hangi sokaktan gideceğini bilmiyoruz,
+// ama en azından caddeleri takip eden MAKUL bir tahmin, binaları kesen düz
+// bir çizgiden çok daha dürüst. Gösterilen süre/etiket buna bağlı DEĞİL
+// (zaten kuş uçuşu mesafeye göre hesaplanıyor), sadece çizginin şekli düzelir.
+const drivingGeometryCache = new Map();
+function fetchDrivingGeometry(a, b) {
+  return fetchOsrmGeometry("routed-car/route/v1/driving", drivingGeometryCache, a, b);
 }
 
 /**
@@ -2252,8 +2267,25 @@ function fetchWalkGeometry(a, b) {
 // değilse sessizce yok sayılır.
 let routeDrawToken = 0;
 
+// Bir rota çizildiğinde, haritadaki DİĞER tüm proje/ilçe pinleri (projectCluster
+// + markersLayer) rotayı boğan bir "pin kirliliği" oluşturuyordu (2026-09-25,
+// kullanıcı raporu) — arka plandaki bu pinler geçici olarak gizlenir, sadece
+// bu rotanın kendi başlangıç/hedef pinleri (drawRoute'un sonunda eklenir)
+// görünür kalır. clearResults() (kullanıcı seçimi tamamen kaldırdığında)
+// bunları geri açar.
+function setBackgroundMarkersVisible(visible) {
+  if (visible) {
+    if (!map.hasLayer(projectCluster)) map.addLayer(projectCluster);
+    if (!map.hasLayer(markersLayer)) map.addLayer(markersLayer);
+  } else {
+    if (map.hasLayer(projectCluster)) map.removeLayer(projectCluster);
+    if (map.hasLayer(markersLayer)) map.removeLayer(markersLayer);
+  }
+}
+
 function drawRoute(originCoords, row, bucket, destCoordsOverride) {
   routesLayer.clearLayers();
+  setBackgroundMarkersVisible(false);
   routeDrawToken += 1;
   const myToken = routeDrawToken;
   const destCoords = destCoordsOverride || { lat: row.project.lat, lng: row.project.lng };
@@ -2317,11 +2349,9 @@ function drawRoute(originCoords, row, bucket, destCoordsOverride) {
     const endA = anchors[i + 1];
     const geometry = geometryOfStep(step);
     const isWalk = step.mode === "hub";
-    const modeColor = MODE_LINE_COLOR[step.mode] || bucket.color;
     const tooltipText = `${MODE_ICON[step.mode] || ""} ${step.line}`;
-    let stepKm = 0; // etikette gösterilecek yaklaşık bacak uzunluğu (gerçek geometri varsa ondan, yoksa düz mesafeden)
-    let midLatLng = null; // etiket baloncuğunun konacağı orta nokta
     let walkPolyToUpgrade = null; // yürüyüş bacağıysa: gerçek sokak rotası gelince setLatLngs ile güncellenecek polyline
+    let fallbackPolyToUpgrade = null; // güvenilmez/geometrisiz araç bacağıysa: gerçek araç rotası gelince güncellenecek polyline
 
     // kind: "solid" (gerçek güzergah, halo'lu) | "walk" (yürüyüş, noktalı mavi,
     // halo'suz) | "fallback" (bu bacak için gerçek geometri yok, modun kendi
@@ -2335,31 +2365,23 @@ function drawRoute(originCoords, row, bucket, destCoordsOverride) {
         // gibi görünüyordu.
         L.polyline(latlngs, {
           color: "#ffffff",
-          weight: 9,
+          weight: 8,
           opacity: 0.9,
           lineJoin: "round",
           lineCap: "round",
           interactive: false,
         }).addTo(routesLayer);
       }
+      // Üç bacak türü de (solid/walk/fallback) ARTIK AYNI TEK mavide
+      // (TRANSIT_LINE_COLOR) — ayrımı renk değil, katılık/kalınlık/kesik
+      // deseni sağlıyor: solid = katı+kalın+halo'lu; walk = küçük sık
+      // noktalar ("2 8"); fallback = daha uzun, belirgin kesikler ("6 6"),
+      // eskisi gibi harita zemininde kaybolan soluk bir gri DEĞİL.
       const poly = L.polyline(latlngs, {
-        // "fallback" (bu bacak için güvenilir gerçek geometri YOK — ya hiç
-        // yok ya da MAX_GEOMETRY_JUMP_KM/RATIO tarafından reddedildi) kasıtlı
-        // olarak modeColor DEĞİL, nötr bir gri kullanır. 2026-09-25'e kadar
-        // modeColor kullanıyordu — otobüs rengi yürüyüşle aynı maviye
-        // çevrildiğinden (bkz. WALK_LINE_COLOR notu), "gerçekten yürüyeceğin
-        // kısa bir mesafe" ile "gerçek güzergahı bilinmeyen, düz çizgiyle
-        // tahmin edilmiş 10 km'lik bir otobüs bacağı" ARTIK AYNI RENKTE
-        // görünüyordu (kullanıcı raporu: Pursaklar→REC Adliye'de 459 hattının
-        // hiç geometrisi yok, 10km'lik düz mavi çizgi yürüyüş sanılıyordu).
-        // Gri, "bu kısmın gerçek güzergahı belirsiz/tahmini" anlamını taşıyor.
-        color: kind === "walk" ? WALK_LINE_COLOR : kind === "solid" ? modeColor : FALLBACK_LINE_COLOR,
-        weight: kind === "solid" ? 5 : kind === "walk" ? 4 : 3,
-        opacity: kind === "solid" ? 1 : kind === "walk" ? 0.85 : 0.75,
-        // Yürüyüş yuvarlak küçük noktalarla (Google'daki gibi); belirsiz
-        // otobüs/metro bacağı daha uzun, "taslak" hissi veren kesik çizgiyle
-        // — ikisi asla aynı görünmesin diye deseni de renk kadar farklı.
-        dashArray: kind === "walk" ? "1 10" : kind === "fallback" ? "6 7" : null,
+        color: kind === "walk" ? WALK_LINE_COLOR : kind === "solid" ? TRANSIT_LINE_COLOR : FALLBACK_LINE_COLOR,
+        weight: kind === "solid" ? 5 : kind === "walk" ? 4 : 4,
+        opacity: kind === "solid" ? 1 : kind === "walk" ? 0.9 : 0.9,
+        dashArray: kind === "walk" ? "2 8" : kind === "fallback" ? "6 6" : null,
         lineJoin: "round",
         lineCap: "round",
       }).addTo(routesLayer);
@@ -2390,10 +2412,11 @@ function drawRoute(originCoords, row, bucket, destCoordsOverride) {
 
         // Gerçek güzergah her zaman katı çizgiyle çizilir.
         drawSegment(seg, "solid");
-        stepKm = segKm;
-        midLatLng = seg[Math.floor(seg.length / 2)];
         // Gerçek hat, bacağın asıl uçlarına (durak/proje konumu) tam ulaşmıyorsa
-        // aradaki fark ince kesikli bir "son adım" çizgisiyle tamamlanır.
+        // aradaki fark ince kesikli bir "son adım" çizgisiyle tamamlanır. Bu
+        // çok kısa tamamlayıcı parçalar (genelde <150m) araç-rotası yükseltmesi
+        // ALMAZ — sadece bacağın TAMAMI güzergahsız kaldığında (aşağıdaki iki
+        // dal) gerçek bir araç rotası aranmaya değer.
         if (haversineKm(startA, nearStart) > REAL_GEOMETRY_CONNECT_LIMIT_KM) {
           drawSegment([[startA.lat, startA.lng], [nearStart.lat, nearStart.lng]], isWalk ? "walk" : "fallback");
         }
@@ -2405,61 +2428,47 @@ function drawRoute(originCoords, row, bucket, destCoordsOverride) {
         // aynı noktasına denk düştü) YA DA dilim güvenilmez bulundu (bkz.
         // MAX_GEOMETRY_JUMP_KM) — dürüstçe kesikli/tahmini göster, TÜM hattı
         // ya da yanlış bir döngüyü katı çizgiyle göstermektense.
-        drawSegment([[startA.lat, startA.lng], [endA.lat, endA.lng]], isWalk ? "walk" : "fallback");
-        stepKm = haversineKm(startA, endA);
-        midLatLng = [(startA.lat + endA.lat) / 2, (startA.lng + endA.lng) / 2];
+        const poly = drawSegment([[startA.lat, startA.lng], [endA.lat, endA.lng]], isWalk ? "walk" : "fallback");
+        if (isWalk) walkPolyToUpgrade = poly;
+        else fallbackPolyToUpgrade = poly;
       }
     } else {
       const poly = drawSegment([[startA.lat, startA.lng], [endA.lat, endA.lng]], isWalk ? "walk" : "fallback");
-      stepKm = haversineKm(startA, endA);
-      midLatLng = [(startA.lat + endA.lat) / 2, (startA.lng + endA.lng) / 2];
       if (isWalk) walkPolyToUpgrade = poly;
-    }
-
-    // Google Maps'teki gibi her bacağın ortasına küçük bir süre (yürüyüş için
-    // ayrıca mesafe) baloncuğu: yürüyen kısımla araca binilen kısmı çizginin
-    // kalınlığına/rengine bakmadan da anında ayırt ettirir.
-    let legLabelMarker = null;
-    if (midLatLng && stepKm > 0.02) {
-      const minutes = isWalk ? walkMinutes(stepKm) : (stepKm / (MODE_SPEED_KMH[step.mode] || MODE_SPEED_KMH.otobus)) * 60;
-      const minText = `${Math.max(1, Math.round(minutes))} dk`;
-      const distText = stepKm < 1 ? `${Math.round(stepKm * 1000)} m` : `${stepKm.toFixed(1)} km`;
-      const labelHtml = isWalk
-        ? `<span class="route-leg-label route-leg-label-walk">🚶 ${minText} · ${distText}</span>`
-        : `<span class="route-leg-label">${MODE_ICON[step.mode] || ""} ${minText}</span>`;
-      legLabelMarker = L.marker(midLatLng, {
-        icon: L.divIcon({ className: "", html: labelHtml, iconSize: [1, 1], iconAnchor: [0, 0] }),
-        interactive: false,
-        keyboard: false,
-      }).addTo(routesLayer);
+      else fallbackPolyToUpgrade = poly;
     }
 
     // Düz "kuş uçuşu" çizgi sadece anlık bir yer tutucu — kullanıcı binaların
     // üzerinden mi yürüyecek diye haklı olarak sorabilir. Gerçek, sokakları
-    // takip eden yaya rotası geldiğinde AYNI polyline/etiket yerinde
-    // güncellenir (bkz. fetchWalkGeometry'nin başındaki not).
+    // takip eden yaya rotası geldiğinde AYNI polyline yerinde güncellenir
+    // (bkz. fetchWalkGeometry'nin başındaki not).
     if (isWalk && walkPolyToUpgrade) {
       fetchWalkGeometry(startA, endA).then((coords) => {
         if (myToken !== routeDrawToken || !coords) return;
         walkPolyToUpgrade.setLatLngs(coords);
-        if (legLabelMarker) {
-          const realKm = polylineKm(coords);
-          const mid = coords[Math.floor(coords.length / 2)];
-          const mins = Math.max(1, Math.round(walkMinutes(realKm)));
-          const distText = realKm < 1 ? `${Math.round(realKm * 1000)} m` : `${realKm.toFixed(1)} km`;
-          legLabelMarker.setLatLng(mid);
-          legLabelMarker.setIcon(
-            L.divIcon({
-              className: "",
-              html: `<span class="route-leg-label route-leg-label-walk">🚶 ${mins} dk · ${distText}</span>`,
-              iconSize: [1, 1],
-              iconAnchor: [0, 0],
-            })
-          );
-        }
+      });
+    }
+    // Aynı mantık, araç profiliyle: geometrisi olmayan/güvenilmez bulunan bir
+    // otobüs/metro bacağı da artık binaları kesen düz bir çizgi yerine,
+    // caddeleri takip eden bir ARAÇ rotasına yükseltilir (bkz. fetchDrivingGeometry).
+    if (!isWalk && fallbackPolyToUpgrade) {
+      fetchDrivingGeometry(startA, endA).then((coords) => {
+        if (myToken !== routeDrawToken || !coords) return;
+        fallbackPolyToUpgrade.setLatLngs(coords);
       });
     }
   });
+
+  // Arka plan pinleri gizlendiği için (bkz. setBackgroundMarkersVisible),
+  // bu rotanın kendi başlangıç ve hedef noktaları ayrıca işaretlenir —
+  // aksi halde harita tamamen "çıplak" kalırdı.
+  L.marker([originCoords.lat, originCoords.lng], { icon: districtIcon("#1e293b") })
+    .bindTooltip("Başlangıç", { direction: "top" })
+    .addTo(routesLayer);
+  const destIsUrgent = row.project && URGENT_PROJECT_IDS.has(row.project.id);
+  const destIcon = row.project ? (destIsUrgent ? urgentProjectIcon : projectIcon) : districtIcon(bucket.color);
+  const destLabel = row.project ? row.project.name : row.district ? row.district.name : "Hedef";
+  L.marker([destCoords.lat, destCoords.lng], { icon: destIcon }).bindTooltip(destLabel, { direction: "top" }).addTo(routesLayer);
 
   if (allPoints.length) {
     map.fitBounds(L.latLngBounds(allPoints), { padding: [70, 70], animate: true, duration: 0.8 });
