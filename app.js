@@ -2361,15 +2361,20 @@ function drawRoute(originCoords, row, bucket, destCoordsOverride) {
     // halo'suz) | "fallback" (bu bacak için gerçek geometri yok, modun kendi
     // renginde ince kesikli — hâlâ o modun bir bacağı, sadece tahmini çizilir).
     const drawSegment = (latlngs, kind) => {
-      if (kind === "solid") {
-        // Google Maps tarzı "halo": renkli çizginin altına biraz daha kalın
-        // beyaz bir kontur çizgisi eklenir. Bunsuz, aynı modun (ör. iki farklı
-        // otobüs hattının) üst üste/yakın geçtiği yerlerde (Bilkent-Beytepe
-        // gibi) çizgiler alttaki harita çizgileriyle karışıp tek bir "yumak"
-        // gibi görünüyordu.
+      // Google Maps tarzı "halo": renkli çizginin altına biraz daha kalın
+      // beyaz bir kontur çizgisi eklenir. Önceleri SADECE "solid" alıyordu;
+      // kullanıcı "araç/metro çizgisi yolların içinde kayboluyor" dedi ve
+      // test ettiği rotada rastlantısal olarak hiç solid bacak yoktu, hepsi
+      // "fallback"ti (geometrisi belirsiz, o zamana kadar halosuz+ince) —
+      // asıl "cılız" görünen oydu. Artık fallback da AYNI halo'yu alıyor;
+      // ikisi arasındaki fark artık sadece kesikli/katı olması (fallback
+      // hâlâ "6 6" ile "bu kısım tahmini" diyor), kalınlık/belirginlikte
+      // DEĞİL. Sadece yürüyüş (zaten kendi kalın boncuk stiliyle belirgin)
+      // halosuz kalıyor — Google da yürüyüş noktalarına halo koymuyor.
+      if (kind === "solid" || kind === "fallback") {
         L.polyline(latlngs, {
           color: "#ffffff",
-          weight: 8,
+          weight: 7,
           opacity: 0.9,
           lineJoin: "round",
           lineCap: "round",
@@ -2377,18 +2382,16 @@ function drawRoute(originCoords, row, bucket, destCoordsOverride) {
         }).addTo(routesLayer);
       }
       // Üç bacak türü de (solid/walk/fallback) ARTIK AYNI TEK lacivertte
-      // (TRANSIT_LINE_COLOR) — ayrımı renk değil, katılık/kalınlık/kesik
-      // deseni sağlıyor: solid = katı+kalın+halo'lu; fallback = daha uzun,
-      // belirgin kesikler ("6 6"), eskisi gibi harita zemininde kaybolan
-      // soluk bir gri DEĞİL. Yürüyüş ise kesikli bir ÇİZGİ değil, Google
-      // Haritalar'daki gibi YUVARLAK BONCUK DİZİSİ: dashArray'in ilk değeri
-      // 0 (çizili kısım sıfır uzunlukta) + lineCap "round" birleşince, her
-      // "dash" aslında weight kadar çaplı tam bir daireye dönüşüyor.
+      // (TRANSIT_LINE_COLOR) — ayrımı renk değil, katı/kesikli olması
+      // sağlıyor. Yürüyüş kesikli bir ÇİZGİ değil, Google Haritalar'daki
+      // gibi YUVARLAK BONCUK DİZİSİ: dashArray'in ilk değeri 0 (çizili
+      // kısım sıfır uzunlukta) + lineCap "round" birleşince, her "dash"
+      // aslında weight kadar çaplı tam bir daireye dönüşüyor.
       const poly = L.polyline(latlngs, {
         color: kind === "walk" ? WALK_LINE_COLOR : kind === "solid" ? TRANSIT_LINE_COLOR : FALLBACK_LINE_COLOR,
-        weight: kind === "solid" ? 5 : kind === "walk" ? 6 : 4,
-        opacity: kind === "solid" ? 1 : kind === "walk" ? 0.9 : 0.9,
-        dashArray: kind === "walk" ? "0 12" : kind === "fallback" ? "6 6" : null,
+        weight: 5,
+        opacity: 1,
+        dashArray: kind === "walk" ? "0 10" : kind === "fallback" ? "6 6" : null,
         lineJoin: "round",
         lineCap: "round",
       }).addTo(routesLayer);
