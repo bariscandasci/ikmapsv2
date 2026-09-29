@@ -202,6 +202,13 @@ function roundTo5(n) {
 // itirazı artık geçerli değil (Etlik→Bilkent Center hâlâ metro tabanlı, Etlik→
 // Medical Park hâlâ 261→480 — doğrulandı). Pursaklar→Nazende 139→120 dk.
 const MODE_SPEED_KMH = { otobus: 20, metro: 33, ankaray: 33, tren: 45, dolmus: 20 };
+// Havalimanı ekspresi (442) ve D140 / Özal Bulvarı üzerindeki uzun etaplar
+// şehir içi 20 km/s ile gidilmez — durak arası birkaç kilometre, ışıksız
+// arter. 48 km/s, istenen 45-50 bandının ortası. Kısa (2.2 km altı) durak
+// aralıkları aynı hatta bile 20 km/s kalır; Kızılay içi sıkışık etap
+// hızlanmaz.
+const ARTERIAL_BUS_SPEED_KMH = 48;
+const ARTERIAL_EDGE_MIN_KM = 2.2;
 const WALK_SPEED_KMH = 4.5;
 // Yürüme, rota SEÇİLİRKEN 1.5x "ağır" sayılır (gösterilen süre yine gerçek
 // yürüme süresidir). Yürüme düz çizgiyle 4.5 km/s hesaplandığı için gerçek
@@ -210,17 +217,101 @@ const WALK_SPEED_KMH = 4.5;
 // çiftinde denendi (2026-09-24): 1.5x → 20 dk üzeri yürüyüş 99→47 çift,
 // ortalama süre neredeyse aynı; 2x ve üstü toplam süreyi kötüleştiriyor.
 const WALK_PENALTY_FACTOR = 1.5;
+// İki bant, ikisi de sadece seçimde. Gösterilen yürüyüş yine 4.5 km/s.
+// Kapı bandı (150 m): 2127 Cd., Dubçek, DURU BEYTEPE, Ahmet Refik, Bilkent
+// Nazende. Bu durak varken 200 m ötesi, özellikle Bahçe Konutları (247 m) ve
+// 124. Sokak (472 m), seçimden düşer.
+// Yakın bant (250 m): kapı durağı yoksa Ankara Oto'daki 231 m'lik besleme
+// durağını metro sonrası 700 m yürüyüşe tercih ettirir.
+const DOOR_ALIGHT_KM = 0.15;
+const DOOR_ALIGHT_MIN_PER_KM = 140;
+const CLOSE_ALIGHT_KM = 0.25;
+const EARLY_ALIGHT_MIN_PER_KM = 45;
+// Nazende'ye 178 / 178-3 / 607 üzerinden 111'e binmek 30–48 km'lik İncek
+// halkasını seçtiriyordu. Bu aktarma zinciri seçimde cezalı. 607'nin tek
+// başına kullanıldığı Gölbaşı–Bilkent koridoru (106-3 → 607) bu çifte girmez.
+const INCEK_RING_HATS = new Set(["178", "178-3", "607"]);
+const NAZENDE_SPUR_HATS = new Set(["111"]);
+const INCEK_CHAIN_PENALTY_MIN = 36;
+// Kuzey (lat >= 39.94) ve uzak batı (lng <= 32.70) çıkışları 106-3 ardından
+// 607'ye binince İncek'e dolanıyor. Gölbaşı ve Çayyolu bu kutunun dışında;
+// orada 106-3 + 607 gerçek koridor olarak kalır.
+const NORTH_INCEK_FEED_MIN_LAT = 39.94;
+const WEST_INCEK_FEED_MAX_LNG = 32.70;
+const NORTH_INCEK_FEED_PENALTY_MIN = 48;
+// Rota denetimi: 3+ hatlı yol, kuş uçuşunun 2.5 katını ve kuş uçuşu + 12 km'yi
+// birlikte aşıyorsa dolanma sayılır. Ankara'nın batı ve güney yol ağı 2.1–2.4
+// kat uzadığı için 1.9 kat eşiği Sincan ve Gölbaşı koridorlarını yanlış işaretliyordu.
 const STOP_DWELL_MIN = 0.4;
-// Sabit bir "aktarma cezası" yerine, her araca binişte (ilk biniş DAHİL,
-// sadece aktarmalarda değil) o modun ortalama sefer sıklığının yarısı kadar
-// bekleme süresi ekleniyor — gerçekte otobüs/metro tam istediğin an orada
-// olmuyor. Başkentray için OSM'den çekilen gerçek "interval" etiketi (15 dk)
-// kullanıldı; otobüs/metro/Ankaray için Ankara'da bilinen tipik sefer
-// sıklıklarına dayalı makul ortalamalar. Aynı hatta kalmaya devam etmek
-// (biniş değişmiyorsa) hâlâ tamamen bedava.
+// Her yeni binişte (ilk biniş ve aktarma) bekleme = o hattın sefer aralığı / 2.
+// Aralık önce LINE_HEADWAY_MIN'den, yoksa mod ortalamasından gelir. Aynı hatta
+// kalmak bedavadır; araç zaten yolundadır, ikinci kez beklenmez.
 const MODE_HEADWAY_MIN = { otobus: 12, metro: 6, ankaray: 6, tren: 15, dolmus: 10 };
-function avgWaitMin(mode) {
-  return (MODE_HEADWAY_MIN[mode] !== undefined ? MODE_HEADWAY_MIN[mode] : MODE_HEADWAY_MIN.otobus) / 2;
+// Hat bazlı sefer aralığı (dakika). Bekleme her yeni binişte aralığın yarısıdır
+// (ilk biniş ve aktarma). Tabloda olmayan hat, mod ortalamasına düşer.
+// 442 gündüz yaklaşık 24 dk'da bir kalktığı için yarım aralık 12 dk kalır;
+// Pursaklar→Esenboğa böylece ~30 dk bandında durur.
+const LINE_HEADWAY_MIN = {
+  "442": 24,
+};
+// Seçim cezası gösterilen süreye girmez. Ek aktarma, en az bu kadar gerçek
+// dakika kazandırmıyorsa elenir — çevre yolu / bulvar / metro dururken
+// 2-3 gereksiz aktarmalı dolaşma seçilmesin. Gösterilen bekleme bunun dışında,
+// hattın kendi sefer aralığının yarısıdır.
+const PRIMARY_TRANSFER_PENALTY_MIN = 8;
+// Güneybatı çevre yolu / bulvar bağlantıları (İncek, Ahlatlıbel, Konya yolu,
+// Eskişehir yolu, Koru-Yargıtay). Şehir içi 20 km/s bu koridorda 8-10 km'lik
+// işe gidişi 90 dk yapıyordu. 50 km/s, 45-50 bandının üstü; 3.8 km'den uzun
+// kenarlar veri sıçramasıdır, hızlanmaz.
+const BOULEVARD_BUS_SPEED_KMH = 50;
+const BOULEVARD_DWELL_MIN = 0.15;
+const BOULEVARD_EDGE_MAX_KM = 3.8;
+const BOULEVARD_LINE_HATS = new Set([
+  "106-3", "178", "178-3", "607", "135-2", "196", "584", "584-1",
+  "109-1", "109-2", "602-6", "236", "130",
+]);
+function isAirportExpressLine(line) {
+  return line.hatNo === "442" || /HAVAL[İI]MAN/i.test(line.name || "");
+}
+function isD140CorridorStop(stop) {
+  return stop.lat >= 40.03 && stop.lat <= 40.15 && stop.lng >= 32.88 && stop.lng <= 33.02;
+}
+function isArterialAirportEdge(line, a, b, km) {
+  if (line.mode !== "otobus" || km < ARTERIAL_EDGE_MIN_KM) return false;
+  if (isAirportExpressLine(line)) return true;
+  return isD140CorridorStop(a) && isD140CorridorStop(b);
+}
+function isBoulevardConnectorLine(line) {
+  if (!line || line.mode !== "otobus") return false;
+  return BOULEVARD_LINE_HATS.has(line.hatNo);
+}
+function inceKChainPenalty(prevHat, nextHat, origin) {
+  if (!nextHat || !prevHat) return 0;
+  const prevRing = INCEK_RING_HATS.has(prevHat);
+  const nextRing = INCEK_RING_HATS.has(nextHat);
+  const nextSpur = NAZENDE_SPUR_HATS.has(nextHat);
+  if ((prevRing && nextRing) || (prevRing && nextSpur)) return INCEK_CHAIN_PENALTY_MIN;
+  if (
+    origin &&
+    prevHat === "106-3" &&
+    nextHat === "607" &&
+    (origin.lat >= NORTH_INCEK_FEED_MIN_LAT || origin.lng <= WEST_INCEK_FEED_MAX_LNG)
+  ) {
+    return NORTH_INCEK_FEED_PENALTY_MIN;
+  }
+  return 0;
+}
+function lineHeadwayMin(line) {
+  if (line && Object.prototype.hasOwnProperty.call(LINE_HEADWAY_MIN, line.hatNo)) {
+    return LINE_HEADWAY_MIN[line.hatNo];
+  }
+  if (line && isAirportExpressLine(line)) return LINE_HEADWAY_MIN["442"];
+  const modeHeadway = line && MODE_HEADWAY_MIN[line.mode];
+  return modeHeadway !== undefined ? modeHeadway : MODE_HEADWAY_MIN.otobus;
+}
+function boardingWaitMin(headwayMin) {
+  const headway = headwayMin != null ? headwayMin : MODE_HEADWAY_MIN.otobus;
+  return headway / 2;
 }
 // 2026-09-24: ego.gov.tr'den 657 otobüs hattının TAMAMININ gerçek hafta içi
 // kalkış saatleri çekilip hat-bazlı ortalama bekleme süresi denendi (bkz.
@@ -361,9 +452,17 @@ function buildTransitGraph(network, options) {
   });
 
   const adjacency = new Map();
-  const addEdge = (fromId, toId, minutes, lineId, mode) => {
+  const addEdge = (fromId, toId, minutes, lineId, mode, arterial, headwayMin, hatNo) => {
     if (!adjacency.has(fromId)) adjacency.set(fromId, []);
-    adjacency.get(fromId).push({ to: toId, minutes, lineId, mode });
+    adjacency.get(fromId).push({
+      to: toId,
+      minutes,
+      lineId,
+      mode,
+      arterial: arterial || false,
+      headwayMin: headwayMin || 0,
+      hatNo: hatNo || null,
+    });
   };
 
   const linesByLocalId = new Map();
@@ -371,16 +470,20 @@ function buildTransitGraph(network, options) {
     if (excludeModes.has(line.mode)) return;
     if (!isRoutableLine(line)) return;
     linesByLocalId.set(line.id, line);
-    const speed = MODE_SPEED_KMH[line.mode] || MODE_SPEED_KMH.otobus;
     const ids = line.stopIds || [];
     for (let i = 0; i < ids.length - 1; i++) {
       const a = stopsById.get(ids[i]);
       const b = stopsById.get(ids[i + 1]);
       if (!a || !b) continue;
       const km = haversineKm({ lat: a.lat, lng: a.lng }, { lat: b.lat, lng: b.lng });
-      const minutes = (km / speed) * 60 + STOP_DWELL_MIN;
-      addEdge(a.id, b.id, minutes, line.id, line.mode);
-      addEdge(b.id, a.id, minutes, line.id, line.mode);
+      const arterial = isArterialAirportEdge(line, a, b, km);
+      const boulevard = !arterial && isBoulevardConnectorLine(line) && km <= BOULEVARD_EDGE_MAX_KM;
+      const speed = arterial ? ARTERIAL_BUS_SPEED_KMH : boulevard ? BOULEVARD_BUS_SPEED_KMH : MODE_SPEED_KMH[line.mode] || MODE_SPEED_KMH.otobus;
+      const dwell = boulevard ? BOULEVARD_DWELL_MIN : STOP_DWELL_MIN;
+      const minutes = (km / speed) * 60 + dwell;
+      const headwayMin = lineHeadwayMin(line);
+      addEdge(a.id, b.id, minutes, line.id, line.mode, arterial, headwayMin, line.hatNo);
+      addEdge(b.id, a.id, minutes, line.id, line.mode, arterial, headwayMin, line.hatNo);
     }
   });
 
@@ -465,7 +568,7 @@ function stopsWithinRadius(graph, lat, lng, radiusKm, requireReliableCoord) {
  * göre yapılır ama GERÇEK süre (ceza hariç) ayrıca realMinutes'ta tutulur —
  * kullanıcıya cezalı/uydurma bir süre asla gösterilmez.
  */
-function runDijkstra(graph, sources, transferPenaltyMin = 0) {
+function runDijkstra(graph, sources, transferPenaltyMin = 0, originCoords = null) {
   const NONE = " "; // henüz hiçbir hatta binilmemiş/sadece yürünüyor durumu
   const dist = new Map(); // "stopId|lineKey" -> sıralama için kullanılan (cezalı olabilir) dakika
   const realDist = new Map(); // "stopId|lineKey" -> GERÇEK dakika (ceza hariç)
@@ -492,7 +595,7 @@ function runDijkstra(graph, sources, transferPenaltyMin = 0) {
       dist.set(key, startMinutes);
       realDist.set(key, realStartMinutes);
       keyStopId.set(key, stopId);
-      heap.push({ stopId, lineKey: NONE, minutes: startMinutes });
+      heap.push({ stopId, lineKey: NONE, minutes: startMinutes, rideHat: null });
       relaxBestAtStop(stopId, key, startMinutes, realStartMinutes);
     }
   });
@@ -510,21 +613,29 @@ function runDijkstra(graph, sources, transferPenaltyMin = 0) {
       // bölgelerinde (Kızılay gibi onlarca hattın kesiştiği duraklar)
       // yürüme zincirleri üzerinden durum sayısı katlanarak patlıyordu
       // (bir seçim ~19 saniye sürüyordu). Yürümenin kendisi bedava (sadece
-      // kendi süresi var); bekleme cezası SADECE bir araca binerken —
-      // ilk biniş dahil, sadece aktarmalarda değil — o hattın moduna göre
-      // uygulanıyor (bkz. avgWaitMin). Aynı hatta kalmaya devam etmek
-      // (biniş hattı değişmiyorsa) hâlâ tamamen bedava.
+      // kendi süresi var); bekleme SADECE yeni bir hatta binerken eklenir
+      // ve o hattın sefer aralığının yarısıdır (boardingWaitMin). Aynı hatta
+      // kalmaya devam etmek hâlâ bedava.
       let waitCost = 0;
       let newLineKey;
       const boarding = e.lineId && curLine !== e.lineId;
       if (e.lineId) {
-        if (boarding) waitCost = avgWaitMin(e.mode);
+        if (boarding) waitCost = boardingWaitMin(e.headwayMin);
         newLineKey = e.lineId;
       } else {
         newLineKey = NONE;
       }
       const penalty = boarding ? transferPenaltyMin : 0;
-      const newMinutes = cur.minutes + e.minutes * (e.lineId ? 1 : WALK_PENALTY_FACTOR) + waitCost + penalty;
+      // Kısa yürüyüş aktarması hat durumunu sıfırlar; bir önceki binişin hat
+      // numarasını ayrıca taşıyoruz ki 178-3 → yürüyüş → 607 gibi halka
+      // bağları cezayı atlatamasın. Bu alan durum anahtarına girmez.
+      let nextRideHat = cur.rideHat || null;
+      let chainPenalty = 0;
+      if (e.lineId && e.hatNo) {
+        if (boarding) chainPenalty = inceKChainPenalty(nextRideHat, e.hatNo, originCoords);
+        nextRideHat = e.hatNo;
+      }
+      const newMinutes = cur.minutes + e.minutes * (e.lineId ? 1 : WALK_PENALTY_FACTOR) + waitCost + penalty + chainPenalty;
       const newRealMinutes = curRealMinutes + e.minutes + waitCost;
       const newKey = e.to + "|" + newLineKey;
       const known = dist.get(newKey);
@@ -533,7 +644,7 @@ function runDijkstra(graph, sources, transferPenaltyMin = 0) {
         realDist.set(newKey, newRealMinutes);
         keyStopId.set(newKey, e.to);
         prev.set(newKey, { fromKey: curKey, lineId: e.lineId, mode: e.mode });
-        heap.push({ stopId: e.to, lineKey: newLineKey, minutes: newMinutes });
+        heap.push({ stopId: e.to, lineKey: newLineKey, minutes: newMinutes, rideHat: nextRideHat });
         relaxBestAtStop(e.to, newKey, newMinutes, newRealMinutes);
       }
     });
@@ -554,9 +665,9 @@ function runDijkstra(graph, sources, transferPenaltyMin = 0) {
 // kılıp (thrashing) her ikisini de her seferinde sıfırdan koştururdu.
 const dijkstraCacheByGraph = new Map();
 
-function getDijkstraFrom(coords, graph = transitGraph, transferPenaltyMin = 0) {
+function getDijkstraFrom(coords, graph = transitGraph, transferPenaltyMin = 0, feedOrigin = null) {
   const key = coords.lat.toFixed(4) + "," + coords.lng.toFixed(4);
-  const variant = transferPenaltyMin || 0;
+  const variant = (transferPenaltyMin || 0) + (feedOrigin ? ":feed" : "");
   let variants = dijkstraCacheByGraph.get(graph);
   if (!variants) {
     variants = new Map();
@@ -567,7 +678,7 @@ function getDijkstraFrom(coords, graph = transitGraph, transferPenaltyMin = 0) {
   const sources = stopsWithinRadius(graph, coords.lat, coords.lng, NEAREST_STOP_SEARCH_KM, true)
     .slice(0, NEAREST_STOP_MAX_CANDIDATES)
     .map(({ stop, km }) => ({ stopId: stop.id, startMinutes: walkMinutes(km) * WALK_PENALTY_FACTOR, realStart: walkMinutes(km) }));
-  const result = runDijkstra(graph, sources, transferPenaltyMin);
+  const result = runDijkstra(graph, sources, transferPenaltyMin, feedOrigin);
   variants.set(variant, { key, result });
   return result;
 }
@@ -596,19 +707,28 @@ function findRealRoute(originCoords, destCoords, graph = transitGraph, fixedSide
   const { prev, keyStopId, bestAtStop, bestStateAtStop, bestRealMinutesAtStop } = getDijkstraFrom(
     fromCoords,
     graph,
-    transferPenaltyMin
+    transferPenaltyMin,
+    fixedSide === "dest" ? null : originCoords
   );
   const toCandidates = stopsWithinRadius(graph, toCoords.lat, toCoords.lng, NEAREST_STOP_SEARCH_KM, true).slice(
     0,
     NEAREST_STOP_MAX_CANDIDATES
   );
 
+  const hasDoorAlight = toCandidates.some((c) => c.km <= DOOR_ALIGHT_KM && bestAtStop.has(c.stop.id));
+  const hasCloseAlight = toCandidates.some((c) => c.km <= CLOSE_ALIGHT_KM && bestAtStop.has(c.stop.id));
   let best = null;
   toCandidates.forEach(({ stop, km }) => {
     const d = bestAtStop.get(stop.id);
     if (d === undefined) return;
     const walk = walkMinutes(km);
-    const total = d + walk * WALK_PENALTY_FACTOR; // sıralama için kullanılan (cezalı olabilir) toplam
+    let walkCost = walk * WALK_PENALTY_FACTOR;
+    if (hasDoorAlight && km > DOOR_ALIGHT_KM) {
+      walkCost += (km - DOOR_ALIGHT_KM) * DOOR_ALIGHT_MIN_PER_KM;
+    } else if (hasCloseAlight && km > CLOSE_ALIGHT_KM) {
+      walkCost += (km - CLOSE_ALIGHT_KM) * EARLY_ALIGHT_MIN_PER_KM;
+    }
+    const total = d + walkCost;
     if (!best || total < best.total) {
       best = { total, stopId: stop.id, realTotal: bestRealMinutesAtStop.get(stop.id) + walk };
     }
@@ -724,7 +844,7 @@ function estimateTransit(origin, dest, fixedSide = "origin") {
     };
   }
 
-  const route = findRealRoute(origin.coords, dest.coords, transitGraph, fixedSide);
+  const route = findRealRoute(origin.coords, dest.coords, transitGraph, fixedSide, PRIMARY_TRANSFER_PENALTY_MIN);
   if (!route) {
     // Güvenlik ağı: bir uç, gerçek ağın 1.2km çevresinde hiç durağa denk
     // gelmiyorsa (ör. Ankara dışı bir adres) düz tahmine düşülür.
@@ -754,13 +874,14 @@ function estimateTransit(origin, dest, fixedSide = "origin") {
   const rideSteps = steps.filter((s) => s.lineId);
   const transfers = Math.max(rideSteps.length - 1, 0);
   const durationMin = Math.max(roundTo5(route.totalMinutes), 5);
+  const rawMinutes = route.totalMinutes;
   const routeSummary = `${rideSteps.length ? rideSteps.map((s) => s.line).join(" + ") : "Yürüyüş"} (${destLabel} civarı)`;
   const verified = steps.every((s) => s.verified);
 
   const dolmusAlternative = buildDolmusAlternative(origin, dest, originLabel, destLabel, route.totalMinutes, fixedSide);
   const minTransfersAlternative = buildMinTransfersAlternative(origin, dest, originLabel, destLabel, transfers, durationMin, fixedSide);
 
-  return { durationMin, transfers, routeSummary, steps, distanceKm, verified, dolmusAlternative, minTransfersAlternative };
+  return { durationMin, rawMinutes, transfers, routeSummary, steps, distanceKm, verified, dolmusAlternative, minTransfersAlternative };
 }
 
 // Ana rota SADECE resmi taşımayla (yukarıda) hesaplanır — dolmuş, resmi
@@ -861,7 +982,7 @@ function buildMinTransfersAlternative(origin, dest, originLabel, destLabel, prim
 // ---------------------------------------------------------------------------
 
 const TransitCache = {
-  KEY: "ik_ulasim_cache_v27", // v27: otobüs hızı 16->20 km/s, sefer 15->12 dk (süreler Google'a yaklaştırıldı). v26: yürüme cezası 1.5x (WALK_PENALTY_FACTOR) rota seçimini değiştirdi. v25: en yakın durak arama yarıçapı 1.8km->2.0km (Pursaklar, güvenilir koordinat filtresi yüzünden 1.8km sınırının hemen dışında kalıp "doğrulanamadı"ya düşüyordu)
+  KEY: "ik_ulasim_cache_v31", // v31: kapı durağı önceliği, İncek halkası seçim cezası. v30: sefer aralığı / 2.
   _mem: null,
   _load() {
     if (this._mem) return this._mem;
@@ -1096,7 +1217,7 @@ function loadDolmusLines() {
 function loadLocalTransitNetwork() {
   if (localTransitNetworkPromise) return localTransitNetworkPromise;
   localTransitNetworkPromise = Promise.all([
-    fetch("transit_network.json?v=4").then((res) => res.json()),
+    fetch("transit_network.json?v=5").then((res) => res.json()),
     loadDolmusLines(),
   ])
     .then(([egoData, dolmusData]) => {
@@ -1141,7 +1262,7 @@ let localTransitGeometry = null;
 let localTransitGeometryPromise = null;
 function loadLocalTransitGeometry() {
   if (localTransitGeometryPromise) return localTransitGeometryPromise;
-  localTransitGeometryPromise = fetch("transit_network_geometry.json?v=2")
+  localTransitGeometryPromise = fetch("transit_network_geometry.json?v=7")
     .then((res) => res.json())
     .then((data) => {
       localTransitGeometry = data;
@@ -1963,6 +2084,7 @@ function renderOriginToProject(originId) {
           showRouteResult(row);
         },
         highlight: idx === 0,
+        liveRow: row,
       })
     );
     if (idx === 0) {
@@ -2015,6 +2137,7 @@ function renderProjectToOrigin(projectId) {
           showRouteResult(row);
         },
         highlight: idx === 0,
+        liveRow: row,
       })
     );
     if (idx === 0) {
@@ -2028,7 +2151,95 @@ function renderProjectToOrigin(projectId) {
   }
 }
 
-function buildResultCard({ title, subtitle, durationMin, transfers, bucket, onClick, highlight, terms, urgent, referral }) {
+let activeBoardMarker = null;
+
+function escapeHtml(value) {
+  return String(value == null ? "" : value).replace(/[&<>"']/g, (ch) => (
+    { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch]
+  ));
+}
+
+function formatClock(date) {
+  return date.toLocaleTimeString("tr-TR", { hour: "2-digit", minute: "2-digit" });
+}
+
+function formatWaitMin(minutes) {
+  const n = Number(minutes);
+  if (!Number.isFinite(n)) return "6";
+  return Number.isInteger(n) ? String(n) : String(Math.round(n * 10) / 10);
+}
+
+function firstBoardContext(row) {
+  const step = (row.steps || []).find((s) => s.lineId);
+  if (!step || !transitGraph) return null;
+  const line = transitGraph.linesByLocalId.get(step.lineId);
+  const stop = step.fromStopId ? transitGraph.stopsById.get(step.fromStopId) : null;
+  if (!line) return null;
+  return {
+    step,
+    line,
+    stop,
+    hatNo: line.hatNo,
+    stopId: step.fromStopId,
+    fallbackWaitMin: boardingWaitMin(lineHeadwayMin(line)),
+  };
+}
+
+function adjustedTripMinutes(row, board, result) {
+  if (!result || result.source !== "live") return row.durationMin;
+  const base = typeof row.rawMinutes === "number" ? row.rawMinutes : row.durationMin;
+  return Math.max(roundTo5(base - board.fallbackWaitMin + result.estimatedWaitMin), 5);
+}
+
+function liveArrivalHtml(board, result, totalMin) {
+  if (!board || !result) return "";
+  const hat = escapeHtml(board.hatNo);
+  if (result.source === "live") {
+    const clock = formatClock(new Date(Date.now() + totalMin * 60000));
+    const waitLabel = result.estimatedWaitMin <= 0 ? "Durakta" : `Durağa ${formatWaitMin(result.estimatedWaitMin)} dk`;
+    return `<div class="live-arrival live-arrival-live">🟢 Canlı: Hat ${hat} • ${waitLabel} (Tahmini Varış: ${clock})</div>`;
+  }
+  return `<div class="live-arrival live-arrival-static">⚪ Statik Sefer: ~${formatWaitMin(result.estimatedWaitMin)} dk bekleme</div>`;
+}
+
+function applyLiveArrival(card, row, result) {
+  const board = firstBoardContext(row);
+  if (!board || !result) return;
+  const totalMin = adjustedTripMinutes(row, board, result);
+  const html = liveArrivalHtml(board, result, totalMin);
+  const slot = card && card.querySelector("[data-role='live-arrival']");
+  if (slot) slot.innerHTML = html;
+  if (result.source === "live" && card) {
+    const badge = card.querySelector("[data-role='duration']");
+    if (badge) badge.textContent = `~${totalMin} dk`;
+  }
+  if (card && card.classList.contains("result-card-active")) {
+    row.liveDurationMin = totalMin;
+    routeDetailTitle.innerHTML = `Rota Detayı · ${row.transfers} aktarma · ~${totalMin} dk`;
+    if (activeBoardMarker) activeBoardMarker.setPopupContent(html);
+  }
+}
+
+function attachLiveArrival(card, row) {
+  const board = firstBoardContext(row);
+  const slot = card.querySelector("[data-role='live-arrival']");
+  if (!board) {
+    if (slot) slot.innerHTML = "";
+    return;
+  }
+  const pending = liveArrivalHtml(board, { source: "static", estimatedWaitMin: board.fallbackWaitMin }, row.durationMin);
+  if (slot) slot.innerHTML = pending;
+  if (!window.LiveBus) return;
+  LiveBus.getLiveBusArrival(board.stopId, board.line.id, {
+    hatNo: board.hatNo,
+    fallbackWaitMin: board.fallbackWaitMin,
+  }).then((result) => {
+    if (!card.isConnected) return;
+    applyLiveArrival(card, row, result);
+  });
+}
+
+function buildResultCard({ title, subtitle, durationMin, transfers, bucket, onClick, highlight, terms, urgent, referral, liveRow }) {
   const card = document.createElement("button");
   card.className = `result-card ${highlight ? "result-card-active" : ""} ${urgent ? "result-card-urgent" : ""}`;
   const referralRow = referral ? `<div class="result-card-referral">📌 ${referral}</div>` : "";
@@ -2054,14 +2265,16 @@ function buildResultCard({ title, subtitle, durationMin, transfers, bucket, onCl
         <div class="text-xs text-slate-500 truncate">${subtitle}</div>
       </div>
       <div class="flex flex-col items-end shrink-0">
-        <span class="duration-badge" style="background:${bucket.color}1a; color:${bucket.color}">~${durationMin} dk</span>
+        <span class="duration-badge" data-role="duration" style="background:${bucket.color}1a; color:${bucket.color}">~${durationMin} dk</span>
         <span class="text-[11px] text-slate-400 mt-1">${transfers} aktarma</span>
       </div>
     </div>
     ${referralRow}
     ${termsRow}
     ${servisNote}
+    <div data-role="live-arrival"></div>
   `;
+  if (liveRow) attachLiveArrival(card, liveRow);
   card.addEventListener("click", () => {
     document.querySelectorAll(".result-card").forEach((c) => c.classList.remove("result-card-active"));
     card.classList.add("result-card-active");
@@ -2178,11 +2391,6 @@ const MAX_GEOMETRY_RATIO = 8;
 // doğrudan dürüst gri/kesikli "fallback" stiline düşülür. Başka HİÇBİR
 // rotayı etkilemez (genel algoritma, guard'lar aynı kalıyor).
 const UNRELIABLE_LINE_SEGMENTS = new Set([
-  // 208-4 İVEDİK METRO-KURTİNİ: Antares AVM/Konutları civarında ham geometri
-  // aynı bölgeyi birkaç kez dolaşıyor (iki nokta neredeyse aynı koordinatta,
-  // aralarında 8 nokta var) — "en yakın nokta" eşleşmesi rotayı AVM'nin
-  // içinden geçiyormuş gibi çiziyor (kullanıcı raporu, ekran görüntüsüyle).
-  "ego_line_208-4|ego_20875|ego_22303",
   // 207 İVEDİK METRO-KARDEŞLER: bu 27 duraklı döngü hattının 71 noktalık
   // ham şekli tek bir düzgün tur değil — aynı "İVEDİK METRO" bölgesini
   // (~32.811-32.818 boylam arası) doğu-batı-doğu diye üç kez zikzaklayarak
@@ -2202,6 +2410,97 @@ function isUnreliableLineSegment(step) {
       step.toStopId &&
       UNRELIABLE_LINE_SEGMENTS.has(`${step.lineId}|${step.fromStopId}|${step.toStopId}`)
   );
+}
+
+// "En yakın geometri noktası" ile iki çapa arasını dilimlemek, döngülü
+// hatlarda (110, 175, 176, 207…) biniş/inişi hattın YANLIŞ geçişine
+// kilitleyip 2 km'lik bir seferi 12 km'lik bir tur gibi çiziyordu. Google
+// Haritalar o hattı durak sırasıyla çizer. Burada her durak çifti için,
+// iki durağa yakın geometri noktaları arasından kuş uçuşuna yakın (ne
+// kestirme, ne koca tur) EN KISA güvenilir parçayı seçiyoruz; geometri yoksa
+// (metro/Ankaray'ın tamamı, otobüs hatlarının ~yarısı) durağın kendisini
+// kullanıyoruz. Böylece çizgi, hattın gerçek durak sırasını takip eder.
+function geometryCandidatesNear(geometry, stop, maxKm) {
+  const scored = [];
+  for (let i = 0; i < geometry.length; i++) {
+    const km = haversineKm({ lat: geometry[i][0], lng: geometry[i][1] }, { lat: stop.lat, lng: stop.lng });
+    if (km <= maxKm) scored.push({ i, km });
+  }
+  scored.sort((x, y) => x.km - y.km);
+  // Geometri durağın tam üzerinden geçiyorsa (yol ağına oturtulmuş hatlar)
+  // 350 m'lik aday, bir sonraki kavşağın noktasını "varış" sanıp dilimi erken
+  // kesiyor ve durak koordinatına düz bir sıçrama bırakıyordu. 40 m içinde
+  // nokta varsa çıpa sadece onlardır.
+  const tight = scored.filter((s) => s.km <= 0.04);
+  if (tight.length) return tight.slice(0, 4).map((s) => s.i);
+  const out = scored.slice(0, 12).map((s) => s.i);
+  if (!out.length) out.push(nearestPointIndex(geometry, stop));
+  return out;
+}
+
+function shortGeometryBetween(geometry, a, b) {
+  const hav = haversineKm({ lat: a.lat, lng: a.lng }, { lat: b.lat, lng: b.lng });
+  const c1 = geometryCandidatesNear(geometry, a, 0.35);
+  const c2 = geometryCandidatesNear(geometry, b, 0.35);
+  let best = null;
+  let bestKm = Infinity;
+  c1.forEach((i) => {
+    c2.forEach((j) => {
+      const lo = Math.min(i, j);
+      const hi = Math.max(i, j);
+      if (hi - lo > 400) return;
+      const seg = geometry.slice(lo, hi + 1);
+      if (seg.length < 2) return;
+      const km = polylineKm(seg);
+      if (maxJumpKm(seg) > MAX_GEOMETRY_JUMP_KM) return;
+      if (km + 0.02 < hav * 0.9) return;
+      if (km > Math.max(hav * 2.2, hav + 0.8)) return;
+      if (km < bestKm) {
+        bestKm = km;
+        best = seg;
+      }
+    });
+  });
+  return best;
+}
+
+function rideShapeLatLngs(step) {
+  if (!step.lineId || !step.fromStopId || !step.toStopId || !transitGraph) return null;
+  const line = transitGraph.linesByLocalId.get(step.lineId);
+  if (!line || !line.stopIds) return null;
+  const ids = line.stopIds;
+  const a = ids.indexOf(step.fromStopId);
+  const b = ids.indexOf(step.toStopId);
+  if (a < 0 || b < 0 || a === b) return null;
+  const ordered = [];
+  if (a < b) {
+    for (let i = a; i <= b; i++) ordered.push(ids[i]);
+  } else {
+    for (let i = a; i >= b; i--) ordered.push(ids[i]);
+  }
+  const geo = localTransitGeometry && localTransitGeometry[step.lineId];
+  const pts = [];
+  const push = (lat, lng) => {
+    const last = pts[pts.length - 1];
+    if (last && Math.abs(last[0] - lat) < 1e-7 && Math.abs(last[1] - lng) < 1e-7) return;
+    pts.push([lat, lng]);
+  };
+  for (let i = 0; i < ordered.length; i++) {
+    const stop = transitGraph.stopsById.get(ordered[i]);
+    if (!stop || typeof stop.lat !== "number") return null;
+    if (i > 0 && geo) {
+      const prev = transitGraph.stopsById.get(ordered[i - 1]);
+      const piece = shortGeometryBetween(geo, prev, stop);
+      if (piece && piece.length > 1) {
+        const start = { lat: piece[0][0], lng: piece[0][1] };
+        const end = { lat: piece[piece.length - 1][0], lng: piece[piece.length - 1][1] };
+        const forward = haversineKm({ lat: prev.lat, lng: prev.lng }, start) <= haversineKm({ lat: prev.lat, lng: prev.lng }, end);
+        (forward ? piece : piece.slice().reverse()).forEach(([lat, lng]) => push(lat, lng));
+      }
+    }
+    push(stop.lat, stop.lng);
+  }
+  return pts.length > 1 ? pts : null;
 }
 
 // Yürüyüş bacakları eskiden iki nokta arası DÜZ çizgiyle ("kuş uçuşu")
@@ -2337,10 +2636,13 @@ function drawRoute(originCoords, row, bucket, destCoordsOverride) {
     const gB = geometryOfStep(steps[i + 1]);
     const boundaryStopId = steps[i].toStopId || steps[i + 1].fromStopId;
     const boundaryStop = boundaryStopId && transitGraph && transitGraph.stopsById.get(boundaryStopId);
-    if (gA && gB) {
-      anchors.push(nearestPairBetweenGeometries(gA, gB));
-    } else if (boundaryStop && typeof boundaryStop.lat === "number") {
+    // Aktarma noktası, iki hattın geometrisinin tesadüfen en yakın olduğu yer
+    // değil, rotanın gerçekten indiği duraktır. Tam hat geometrisi üzerinden
+    // "en yakın çift" döngülü hatlarda aktarmayı kilometrelerce uzağa atıyordu.
+    if (boundaryStop && typeof boundaryStop.lat === "number") {
       anchors.push({ lat: boundaryStop.lat, lng: boundaryStop.lng });
+    } else if (gA && gB) {
+      anchors.push(nearestPairBetweenGeometries(gA, gB));
     } else {
       anchors.push(interpolateCoords(originCoords, destCoords, (i + 1) / steps.length));
     }
@@ -2351,7 +2653,6 @@ function drawRoute(originCoords, row, bucket, destCoordsOverride) {
   steps.forEach((step, i) => {
     const startA = anchors[i];
     const endA = anchors[i + 1];
-    const geometry = geometryOfStep(step);
     const isWalk = step.mode === "hub";
     const tooltipText = `${MODE_ICON[step.mode] || ""} ${step.line}`;
     let walkPolyToUpgrade = null; // yürüyüş bacağıysa: gerçek sokak rotası gelince setLatLngs ile güncellenecek polyline
@@ -2400,52 +2701,32 @@ function drawRoute(originCoords, row, bucket, destCoordsOverride) {
       return poly;
     };
 
-    if (geometry) {
-      const i1 = nearestPointIndex(geometry, startA);
-      const i2 = nearestPointIndex(geometry, endA);
-      const lo = Math.min(i1, i2);
-      const hi = Math.max(i1, i2);
-      const seg = geometry.slice(lo, hi + 1).map(([lat, lng]) => [lat, lng]);
-      const segKm = seg.length > 1 ? polylineKm(seg) : 0;
-      const segTrusted =
-        !isUnreliableLineSegment(step) &&
-        seg.length > 1 &&
-        maxJumpKm(seg) <= MAX_GEOMETRY_JUMP_KM &&
-        segKm <= Math.max(haversineKm(startA, endA) * MAX_GEOMETRY_RATIO, 2);
+    const rail = step.mode === "metro" || step.mode === "ankaray" || step.mode === "tren";
+    const along = !isWalk && !isUnreliableLineSegment(step) ? rideShapeLatLngs(step) : null;
+    const jumpLimit = rail ? 4 : MAX_GEOMETRY_JUMP_KM;
+    const shapeTrusted = along && along.length > 1 && maxJumpKm(along) <= jumpLimit;
 
-      if (segTrusted) {
-        const segStart = { lat: seg[0][0], lng: seg[0][1] };
-        const segEnd = { lat: seg[seg.length - 1][0], lng: seg[seg.length - 1][1] };
-        const startIsNearSegStart = haversineKm(startA, segStart) <= haversineKm(startA, segEnd);
-        const nearStart = startIsNearSegStart ? segStart : segEnd;
-        const nearEnd = startIsNearSegStart ? segEnd : segStart;
-
-        // Gerçek güzergah her zaman katı çizgiyle çizilir.
-        drawSegment(seg, "solid");
-        // Gerçek hat, bacağın asıl uçlarına (durak/proje konumu) tam ulaşmıyorsa
-        // aradaki fark ince kesikli bir "son adım" çizgisiyle tamamlanır. Bu
-        // çok kısa tamamlayıcı parçalar (genelde <150m) araç-rotası yükseltmesi
-        // ALMAZ — sadece bacağın TAMAMI güzergahsız kaldığında (aşağıdaki iki
-        // dal) gerçek bir araç rotası aranmaya değer.
-        if (haversineKm(startA, nearStart) > REAL_GEOMETRY_CONNECT_LIMIT_KM) {
-          drawSegment([[startA.lat, startA.lng], [nearStart.lat, nearStart.lng]], isWalk ? "walk" : "fallback");
-        }
-        if (haversineKm(endA, nearEnd) > REAL_GEOMETRY_CONNECT_LIMIT_KM) {
-          drawSegment([[nearEnd.lat, nearEnd.lng], [endA.lat, endA.lng]], isWalk ? "walk" : "fallback");
-        }
-      } else {
-        // Gerçek geometri bu bacak için kullanılamadı (uçlar hattın tamamen
-        // aynı noktasına denk düştü) YA DA dilim güvenilmez bulundu (bkz.
-        // MAX_GEOMETRY_JUMP_KM) — dürüstçe kesikli/tahmini göster, TÜM hattı
-        // ya da yanlış bir döngüyü katı çizgiyle göstermektense.
-        const poly = drawSegment([[startA.lat, startA.lng], [endA.lat, endA.lng]], isWalk ? "walk" : "fallback");
-        if (isWalk) walkPolyToUpgrade = poly;
-        else fallbackPolyToUpgrade = poly;
+    if (shapeTrusted) {
+      // Durak sırasına oturan parça: katı çizgi. Metro/Ankaray'da OSM ray
+      // geometrisi olmadığı için bu, istasyonları sırayla birleştirir —
+      // caddeden giden bir araç rotası değil.
+      drawSegment(along, "solid");
+      const segStart = { lat: along[0][0], lng: along[0][1] };
+      const segEnd = { lat: along[along.length - 1][0], lng: along[along.length - 1][1] };
+      if (haversineKm(startA, segStart) > REAL_GEOMETRY_CONNECT_LIMIT_KM) {
+        drawSegment([[startA.lat, startA.lng], [segStart.lat, segStart.lng]], "fallback");
+      }
+      if (haversineKm(endA, segEnd) > REAL_GEOMETRY_CONNECT_LIMIT_KM) {
+        drawSegment([[segEnd.lat, segEnd.lng], [endA.lat, endA.lng]], "fallback");
       }
     } else {
+      // Güvenilir durak-sıralı şekil yok (kopuk geometri, elle işaretli
+      // bozuk bacak, ya da yürüyüş). Düz çizgi yer tutucu; yürüyüş ve
+      // otobüs bacakları sokak rotasına yükseltilir. Metro/Ankaray/tren
+      // asla araba rotasıyla çizilmez — ray caddenin üzerinden gitmez.
       const poly = drawSegment([[startA.lat, startA.lng], [endA.lat, endA.lng]], isWalk ? "walk" : "fallback");
       if (isWalk) walkPolyToUpgrade = poly;
-      else fallbackPolyToUpgrade = poly;
+      else if (!rail) fallbackPolyToUpgrade = poly;
     }
 
     // Düz "kuş uçuşu" çizgi sadece anlık bir yer tutucu — kullanıcı binaların
@@ -2499,6 +2780,33 @@ function drawRoute(originCoords, row, bucket, destCoordsOverride) {
   const destIcon = L.divIcon({ className: "", html: `<div class="pin pin-dest-flag"></div>`, iconSize: [26, 26], iconAnchor: [13, 26] });
   const destLabel = row.project ? row.project.name : row.district ? row.district.name : "Hedef";
   L.marker([destCoords.lat, destCoords.lng], { icon: destIcon }).bindTooltip(destLabel, { direction: "top" }).addTo(routesLayer);
+
+  activeBoardMarker = null;
+  const board = firstBoardContext(row);
+  if (board && board.stop && typeof board.stop.lat === "number") {
+    const staticResult = { source: "static", estimatedWaitMin: board.fallbackWaitMin };
+    const marker = L.circleMarker([board.stop.lat, board.stop.lng], {
+      radius: 8,
+      color: "#047857",
+      weight: 3,
+      fillColor: "#ffffff",
+      fillOpacity: 1,
+    }).addTo(routesLayer);
+    marker.bindTooltip(`${board.stop.name} · biniş`, { direction: "top" });
+    marker.bindPopup(liveArrivalHtml(board, staticResult, row.durationMin), { maxWidth: 280 });
+    activeBoardMarker = marker;
+    if (window.LiveBus) {
+      LiveBus.getLiveBusArrival(board.stopId, board.line.id, {
+        hatNo: board.hatNo,
+        fallbackWaitMin: board.fallbackWaitMin,
+      }).then((result) => {
+        if (myToken !== routeDrawToken || activeBoardMarker !== marker) return;
+        const activeCard = document.querySelector(".result-card-active");
+        if (activeCard) applyLiveArrival(activeCard, row, result);
+        else marker.setPopupContent(liveArrivalHtml(board, result, adjustedTripMinutes(row, board, result)));
+      });
+    }
+  }
 
   if (allPoints.length) {
     map.fitBounds(L.latLngBounds(allPoints), { padding: [70, 70], animate: true, duration: 0.8 });

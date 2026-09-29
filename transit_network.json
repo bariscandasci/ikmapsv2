@@ -59467,10 +59467,10 @@
     {
       "id": "ego_40813",
       "name": "ESENBOĞA HAVALİMANI İÇ HATLAR",
-      "address": "-",
-      "lat": 40.085454,
-      "lng": 32.971678,
-      "coordSource": "enterpolasyon"
+      "address": "Esenboğa Havalimanı iç hatlar terminali",
+      "lat": 40.123,
+      "lng": 32.999,
+      "coordSource": "gercek"
     },
     {
       "id": "ego_40823",
