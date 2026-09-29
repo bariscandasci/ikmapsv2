@@ -285,6 +285,20 @@ function isBoulevardConnectorLine(line) {
   if (!line || line.mode !== "otobus") return false;
   return BOULEVARD_LINE_HATS.has(line.hatNo);
 }
+// 220-7 Mamak Devlet Hastanesi önünden (ego_31138) kalkıp Podium'a kadar
+// gidiyor. Şehir içi 20 km/s ve durak başı 0.4 dk, 50 duraklık bu ÖHO'yu
+// ~87 dk yapıyordu; arama bunun yerine Köstence'den B1'e binip Gazi
+// Mahallesi'nde aynı hatta aktarma yapıyordu. 30 km/s ve kısa duraklama
+// doğrudan binişi Google'daki ~55 dk bandına indirir. 3 km üstü kenar
+// veri sıçramasıdır, hızlanmaz.
+const OHO_CORRIDOR_SPEED_KMH = 30;
+const OHO_CORRIDOR_DWELL_MIN = 0.15;
+const OHO_CORRIDOR_EDGE_MAX_KM = 3;
+const OHO_CORRIDOR_HATS = new Set(["220-7"]);
+function isOhoCorridorLine(line) {
+  if (!line || line.mode !== "otobus") return false;
+  return OHO_CORRIDOR_HATS.has(line.hatNo);
+}
 function inceKChainPenalty(prevHat, nextHat, origin) {
   if (!nextHat || !prevHat) return 0;
   const prevRing = INCEK_RING_HATS.has(prevHat);
@@ -478,8 +492,9 @@ function buildTransitGraph(network, options) {
       const km = haversineKm({ lat: a.lat, lng: a.lng }, { lat: b.lat, lng: b.lng });
       const arterial = isArterialAirportEdge(line, a, b, km);
       const boulevard = !arterial && isBoulevardConnectorLine(line) && km <= BOULEVARD_EDGE_MAX_KM;
-      const speed = arterial ? ARTERIAL_BUS_SPEED_KMH : boulevard ? BOULEVARD_BUS_SPEED_KMH : MODE_SPEED_KMH[line.mode] || MODE_SPEED_KMH.otobus;
-      const dwell = boulevard ? BOULEVARD_DWELL_MIN : STOP_DWELL_MIN;
+      const oho = !arterial && !boulevard && isOhoCorridorLine(line) && km <= OHO_CORRIDOR_EDGE_MAX_KM;
+      const speed = arterial ? ARTERIAL_BUS_SPEED_KMH : boulevard ? BOULEVARD_BUS_SPEED_KMH : oho ? OHO_CORRIDOR_SPEED_KMH : MODE_SPEED_KMH[line.mode] || MODE_SPEED_KMH.otobus;
+      const dwell = boulevard ? BOULEVARD_DWELL_MIN : oho ? OHO_CORRIDOR_DWELL_MIN : STOP_DWELL_MIN;
       const minutes = (km / speed) * 60 + dwell;
       const headwayMin = lineHeadwayMin(line);
       addEdge(a.id, b.id, minutes, line.id, line.mode, arterial, headwayMin, line.hatNo);
